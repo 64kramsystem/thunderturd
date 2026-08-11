@@ -227,15 +227,6 @@
         border-color: var(--tree-card-border);
       }
     }
-
-    @media (prefers-reduced-motion: no-preference) {
-      & .card-container {
-        transition:
-          background-color var(--transition-duration) ease,
-          color var(--transition-duration) ease,
-          border-color var(--transition-duration) ease;
-      }
-    }
   }
 
   /* Selection */
@@ -697,6 +688,11 @@ slot[name="placeholders"] {
 
 /* Transitions and animations */
 
+/*
+ * Keep row selection changes instantaneous. Animating row and icon colors
+ * causes continuous painting while navigating the message list.
+ */
+
 @media (prefers-reduced-motion: no-preference) {
   .tree-view-scrollable-container {
     scroll-behavior: smooth;
@@ -704,19 +700,6 @@ slot[name="placeholders"] {
 
   thead[is="tree-view-table-header"] hr[is="pane-splitter"] {
     transition: background-color var(--transition-duration) var(--transition-timing);
-  }
-
-  table[is="tree-view-table"] tbody tr {
-    transition:
-      color var(--transition-duration) var(--transition-timing),
-      background-color var(--transition-duration) var(--transition-timing);
-
-    & img {
-      transition:
-        color var(--transition-duration) var(--transition-timing),
-        fill var(--transition-duration) var(--transition-timing),
-        stroke var(--transition-duration) var(--transition-timing);
-    }
   }
 }
 
