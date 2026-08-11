@@ -59,6 +59,96 @@ add_task(async function testKeyboardAndMouse() {
   }
 });
 
+add_task(async function testKeyboardScrollBehavior() {
+  await runTestInSandbox(subtestKeyboardScrollBehavior, "header");
+  await runTestInSandbox(subtestExpandedRowScrollBehavior, "scroll");
+});
+
+/**
+ * Tests that keyboard navigation bypasses smooth scrolling while mouse and
+ * programmatic selection retain the configured scroll behavior.
+ */
+async function subtestKeyboardScrollBehavior() {
+  const doc = content.document;
+  const list = doc.getElementById("testTree");
+  const calls = [];
+
+  list.selectedIndex = 10;
+  list.scrollToIndex = (index, instant) =>
+    calls.push({ index, instant: instant ?? false });
+
+  function checkKey(key, modifiers = {}) {
+    calls.length = 0;
+    EventUtils.synthesizeKey(key, modifiers, content);
+    Assert.equal(calls.length, 1, `${key} scrolls once`);
+    Assert.equal(calls[0].instant, true, `${key} scrolls instantly`);
+  }
+
+  try {
+    list.table.body.focus();
+    checkKey("VK_DOWN");
+    checkKey("VK_HOME");
+    checkKey("VK_END");
+    checkKey("VK_PAGE_UP");
+    checkKey("VK_PAGE_DOWN");
+    checkKey("VK_UP", { shiftKey: true });
+    checkKey("VK_UP", { accelKey: true });
+
+    calls.length = 0;
+    list.currentIndex = 10;
+    Assert.deepEqual(
+      calls,
+      [{ index: 10, instant: false }],
+      "programmatic index changes retain normal scrolling"
+    );
+
+    calls.length = 0;
+    EventUtils.synthesizeMouseAtCenter(list.getRowAtIndex(1), {}, content);
+    Assert.deepEqual(
+      calls,
+      [{ index: 1, instant: false }],
+      "mouse selection retains normal scrolling"
+    );
+  } finally {
+    delete list.scrollToIndex;
+  }
+}
+
+/**
+ * Tests instant scrolling when keyboard navigation expands a thread.
+ */
+async function subtestExpandedRowScrollBehavior() {
+  const doc = content.document;
+  const list = doc.getElementById("testTree");
+  const calls = [];
+
+  list.selectedIndex = 2;
+  list.scrollExpandedRowIntoView = (...args) => calls.push(args);
+
+  try {
+    list.table.body.focus();
+    EventUtils.synthesizeKey("VK_RIGHT", {}, content);
+    Assert.equal(calls.length, 1, "keyboard expansion scrolls once");
+    Assert.equal(calls[0][4], true, "keyboard expansion scrolls instantly");
+
+    list.collapseRowAtIndex(2);
+    calls.length = 0;
+    EventUtils.synthesizeMouseAtCenter(
+      doc.getElementById("row-4").querySelector(".twisty"),
+      {},
+      content
+    );
+    Assert.equal(calls.length, 1, "mouse expansion scrolls once");
+    Assert.equal(
+      calls[0][4] ?? false,
+      false,
+      "mouse expansion retains normal scrolling"
+    );
+  } finally {
+    delete list.scrollExpandedRowIntoView;
+  }
+}
+
 async function subtestKeyboardAndMouse(variant) {
   const doc = content.document;
 

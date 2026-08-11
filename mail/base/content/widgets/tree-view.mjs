@@ -1269,12 +1269,15 @@ export class BaseTreeView extends HTMLElement {
    *   certain cases.
    * @param {integer} [firstIndex=index] - the index of the first row of the
    *   expanded branch.
+   * @param {boolean} [instantScroll=false] - Whether scrolling should be
+   *   instant, regardless of the CSS scroll behavior.
    */
   scrollExpandedRowIntoView(
     index,
     addedRows,
     dummyScrollNeeded = false,
-    firstIndex = index
+    firstIndex = index,
+    instantScroll = false
   ) {
     const rowHeight = this._rowElementClass.ROW_HEIGHT;
     const visibleHeight = this.#calculateVisibleHeight();
@@ -1288,17 +1291,18 @@ export class BaseTreeView extends HTMLElement {
       rowHeight;
     const topOfFirstRow = rowHeight * index;
     if (bottomOfLastRow > this.scrollTop + visibleHeight) {
+      const behavior = instantScroll ? "instant" : "auto";
       if (dummyScrollNeeded) {
         // Expanding a thread near the bottom of the view right
         // after collapsing results in the exact same scrolling
         // destination, which is then discarded by
         // nsHTMLScrollFrame::ApzSmoothScrollTo
         // So we reset it by doing a dummy scroll before.
-        this.scrollTo({ top: 0 });
+        this.scrollTo({ top: 0, behavior });
       }
       this.scrollTo({
         top: Math.min(topOfFirstRow, bottomOfLastRow - visibleHeight),
-        behavior: "auto",
+        behavior,
       });
     }
   }
@@ -1542,6 +1546,8 @@ export class TreeView extends BaseTreeView {
                 this.scrollExpandedRowIntoView(
                   this.currentIndex,
                   addedRows,
+                  true,
+                  this.currentIndex,
                   true
                 );
               } else {
@@ -1549,7 +1555,7 @@ export class TreeView extends BaseTreeView {
               }
             }
             if (newIndex != undefined) {
-              this._selectSingle(newIndex);
+              this._selectSingle(newIndex, false, true);
             }
             return;
           }
@@ -1578,11 +1584,11 @@ export class TreeView extends BaseTreeView {
           if (newIndex != null) {
             if (event[accelKeyName] && !event.shiftKey) {
               // Change focus, but not selection.
-              this.currentIndex = newIndex;
+              this._setCurrentIndex(newIndex, true);
             } else if (event.shiftKey) {
-              this._selectRange(-1, newIndex, event[accelKeyName]);
+              this._selectRange(-1, newIndex, event[accelKeyName], true);
             } else {
-              this._selectSingle(newIndex, true);
+              this._selectSingle(newIndex, true, true);
             }
           }
           event.preventDefault();
@@ -1717,6 +1723,17 @@ export class TreeView extends BaseTreeView {
   }
 
   set currentIndex(index) {
+    this._setCurrentIndex(index);
+  }
+
+  /**
+   * Set the current index and scroll it into view.
+   *
+   * @param {integer} index
+   * @param {boolean} [instantScroll=false] - Whether scrolling should be
+   *   instant, regardless of the CSS scroll behavior.
+   */
+  _setCurrentIndex(index, instantScroll = false) {
     if (!this._view) {
       return;
     }
@@ -1724,7 +1741,7 @@ export class TreeView extends BaseTreeView {
     this._selection.currentIndex = index;
     this._updateCurrentIndexClasses();
     if (index >= 0 && index < this._view.rowCount) {
-      this.scrollToIndex(index);
+      this.scrollToIndex(index, instantScroll);
     }
   }
 
@@ -1764,15 +1781,17 @@ export class TreeView extends BaseTreeView {
    * @protected
    * @param {integer} index - The index to select.
    * @param {boolean} [delaySelect=false] - If the selection should be delayed.
+   * @param {boolean} [instantScroll=false] - Whether scrolling should be
+   *   instant, regardless of the CSS scroll behavior.
    */
-  _selectSingle(index, delaySelect = false) {
+  _selectSingle(index, delaySelect = false, instantScroll = false) {
     const changeSelection =
       this._selection.count != 1 || !this._selection.isSelected(index);
     // Update the TreeSelection selection to trigger a tree reset().
     if (changeSelection) {
       this._selection.select(index);
     }
-    this.currentIndex = index;
+    this._setCurrentIndex(index, instantScroll);
     if (changeSelection) {
       this.onSelectionChanged(delaySelect);
     }
@@ -1786,10 +1805,12 @@ export class TreeView extends BaseTreeView {
    * @param {number} end - End index of selection.
    * @param {boolean} [extend=false] - If the new selection range should extend
    *   the current selection.
+   * @param {boolean} [instantScroll=false] - Whether scrolling should be
+   *   instant, regardless of the CSS scroll behavior.
    */
-  _selectRange(start, end, extend = false) {
+  _selectRange(start, end, extend = false, instantScroll = false) {
     this._selection.rangedSelect(start, end, extend);
-    this.currentIndex = start == -1 ? end : start;
+    this._setCurrentIndex(start == -1 ? end : start, instantScroll);
     this.onSelectionChanged();
   }
 
