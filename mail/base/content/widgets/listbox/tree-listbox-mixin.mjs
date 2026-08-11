@@ -63,7 +63,7 @@ export const TreeListboxMixin = Base =>
      * @type {integer}
      */
     get selectedIndex() {
-      return this.rows.findIndex(row => row == this.selectedRow);
+      return this.#getRowIndex(this.selectedRow);
     }
 
     set selectedIndex(index) {
@@ -82,18 +82,72 @@ export const TreeListboxMixin = Base =>
     }
 
     /**
+     * The visible rows and their indices. These values are invalidated when
+     * the DOM or expansion state changes and rebuilt on first use.
+     *
+     * @type {?HTMLLIElement[]}
+     */
+    #visibleRows = null;
+
+    /** @type {?Map<HTMLLIElement, integer>} */
+    #rowIndices = null;
+
+    /**
+     * Rows whose selection classes were applied by `updateRowClasses`.
+     * Tracking them avoids searching the complete tree on every selection.
+     *
+     * @type {Set<HTMLLIElement>}
+     */
+    #styledRows = new Set();
+
+    #invalidateVisibleRows() {
+      this.#visibleRows = null;
+      this.#rowIndices = null;
+    }
+
+    /**
+     * Get the cached visible rows without copying them.
+     *
+     * @returns {HTMLLIElement[]}
+     */
+    #getVisibleRows() {
+      if (!this.#visibleRows) {
+        this.#visibleRows = this._rowsData
+          .filter(
+            ({ row, ancestors }) =>
+              !row.classList.contains("unselectable") &&
+              !ancestors.some(ancestor =>
+                ancestor.classList.contains("collapsed")
+              )
+          )
+          .map(({ row }) => row);
+        this.#rowIndices = new Map(
+          this.#visibleRows.map((row, index) => [row, index])
+        );
+      }
+      return this.#visibleRows;
+    }
+
+    /**
+     * Get a visible row's index.
+     *
+     * @param {?HTMLLIElement} row
+     * @returns {integer}
+     */
+    #getRowIndex(row) {
+      this.#getVisibleRows();
+      return this.#rowIndices.get(row) ?? -1;
+    }
+
+    /**
      * Every visible row. Rows with collapsed ancestors are not included.
      *
      * @type {HTMLLIElement[]}
      */
     get rows() {
-      return [...this.querySelectorAll("li:not(.unselectable)")].filter(row => {
-        const collapsed = row.parentNode.closest("li.collapsed");
-        if (collapsed && this.contains(collapsed)) {
-          return false;
-        }
-        return true;
-      });
+      // Preserve the existing fresh-array API. Internal hot paths use the
+      // cached array directly.
+      return [...this.#getVisibleRows()];
     }
 
     /**
@@ -102,7 +156,7 @@ export const TreeListboxMixin = Base =>
      * @type {integer}
      */
     get rowCount() {
-      return this.rows.length;
+      return this.#getVisibleRows().length;
     }
 
     /**
@@ -147,6 +201,9 @@ export const TreeListboxMixin = Base =>
       this._mutationObserver.observe(this, {
         subtree: true,
         childList: true,
+        attributes: true,
+        attributeFilter: ["class"],
+        attributeOldValue: true,
       });
     }
 
@@ -365,6 +422,7 @@ export const TreeListboxMixin = Base =>
      * re-connected.
      */
     domChanged() {
+      this.#invalidateVisibleRows();
       this._rowsData = Array.from(this.querySelectorAll("li"), row => {
         const ancestors = [];
         for (
@@ -376,9 +434,42 @@ export const TreeListboxMixin = Base =>
         }
         return { row, ancestors };
       });
+
+      for (const row of this.#styledRows) {
+        if (!this.contains(row)) {
+          row.classList.remove("selected", "current");
+          row.ariaSelected = "false";
+          this.#styledRows.delete(row);
+        }
+      }
+      for (const { row } of this._rowsData) {
+        if (row.classList.contains("selected")) {
+          this.#styledRows.add(row);
+        }
+      }
     }
 
     _mutationObserver = new MutationObserver(mutations => {
+      const hasVisibleRowsChange = mutations.some(mutation => {
+        if (mutation.type == "childList") {
+          return true;
+        }
+
+        if (!mutation.target.matches("li")) {
+          return false;
+        }
+
+        const oldClasses = new Set(mutation.oldValue?.split(/\s+/) ?? []);
+        return ["collapsed", "unselectable"].some(
+          className =>
+            oldClasses.has(className) !=
+            mutation.target.classList.contains(className)
+        );
+      });
+      if (!hasVisibleRowsChange) {
+        return;
+      }
+
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
           if (node.nodeType != Node.ELEMENT_NODE || !node.matches("li")) {
@@ -537,7 +628,7 @@ export const TreeListboxMixin = Base =>
      * @returns {HTMLLIElement?}
      */
     getRowAtIndex(index) {
-      return this.rows[index];
+      return this.#getVisibleRows()[index];
     }
 
     /**
@@ -634,9 +725,9 @@ export const TreeListboxMixin = Base =>
 
       // If SHIFT is pressed, we need to handle a range selection.
       if (event.shiftKey && previousRow) {
-        const allRows = this.rows; // Get currently visible elements
-        const start = allRows.indexOf(previousRow);
-        const end = allRows.indexOf(row);
+        const allRows = this.#getVisibleRows();
+        const start = this.#getRowIndex(previousRow);
+        const end = this.#getRowIndex(row);
 
         if (start !== -1 && end !== -1) {
           const [min, max] = start < end ? [start, end] : [end, start];
@@ -674,10 +765,11 @@ export const TreeListboxMixin = Base =>
     updateRowClasses() {
       this.classList.toggle("multi-selected", this.#selection.size > 1);
 
-      for (const row of this.querySelectorAll("li.selected")) {
+      for (const row of this.#styledRows) {
         row.classList.remove("selected", "current");
         row.ariaSelected = "false";
       }
+      this.#styledRows.clear();
 
       if (!this.#selection.size) {
         this.removeAttribute("aria-activedescendant");
@@ -694,6 +786,7 @@ export const TreeListboxMixin = Base =>
       this.#selection.forEach(row => {
         row.classList.add("selected");
         row.ariaSelected = "true";
+        this.#styledRows.add(row);
 
         if (this.selectedRow == row) {
           row.classList.add("current");
@@ -762,6 +855,7 @@ export const TreeListboxMixin = Base =>
           selectionChanged = true;
         }
         row.classList.add("collapsed");
+        this.#invalidateVisibleRows();
         if (this.isTree) {
           row.setAttribute("aria-expanded", "false");
         }
@@ -784,6 +878,7 @@ export const TreeListboxMixin = Base =>
         row.classList.contains("collapsed")
       ) {
         row.classList.remove("collapsed");
+        this.#invalidateVisibleRows();
         if (this.isTree) {
           row.setAttribute("aria-expanded", "true");
         }
