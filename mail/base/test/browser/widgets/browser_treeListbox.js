@@ -29,6 +29,9 @@ add_task(async function testMouse() {
 add_task(async function testMutation() {
   await withTab(subtestMutation);
 });
+add_task(async function testVisibleRowsCache() {
+  await withTab(subtestVisibleRowsCache);
+});
 add_task(async function testExpandCollapse() {
   await withTab(subtestExpandCollapse);
 });
@@ -499,6 +502,101 @@ async function subtestMutation() {
   Assert.equal(list.selectedIndex, 5, "row-3-1 is still selected");
 
   list.selectedIndex = 0;
+}
+
+/**
+ * Tests that visible rows stay correct after cache invalidation and that
+ * ordinary keyboard navigation does not search the complete DOM tree.
+ */
+async function subtestVisibleRowsCache() {
+  const doc = content.document;
+  const list = doc.querySelector(`ul[is="tree-listbox"]`);
+  const initialIds = list.rows.map(row => row.id);
+
+  // The public rows array can be modified without corrupting internal state.
+  list.rows.reverse();
+  Assert.deepEqual(
+    list.rows.map(row => row.id),
+    initialIds,
+    "modifying a returned rows array does not change row order"
+  );
+
+  // A structural mutation beneath a collapsed row must not make the new row
+  // visible until its ancestor is expanded.
+  const parent = doc.getElementById("row-2");
+  list.collapseRow(parent);
+  Assert.equal(list.rowCount, 6, "collapsed descendants are not visible");
+
+  const newRow = doc.createElement("li");
+  newRow.id = "cached-new-row";
+  newRow.appendChild(doc.createElement("div"));
+  parent.querySelector("ul").appendChild(newRow);
+  await new Promise(resolve => content.setTimeout(resolve));
+
+  Assert.equal(
+    list.rowCount,
+    6,
+    "a row added beneath a collapsed parent remains hidden"
+  );
+  Assert.equal(
+    list.rows.includes(newRow),
+    false,
+    "the added row is absent from visible rows"
+  );
+
+  list.expandRow(parent);
+  Assert.equal(list.rowCount, 9, "expanding exposes the added row");
+  Assert.equal(list.selectedIndex, 0, "selection index remains correct");
+
+  // Callers also change visibility classes directly. The mutation observer
+  // must invalidate the cache for those changes without treating ordinary
+  // selection styling as a structural mutation.
+  parent.classList.add("collapsed");
+  await new Promise(resolve => content.setTimeout(resolve));
+  Assert.equal(
+    list.rowCount,
+    6,
+    "directly collapsing an attached row hides its descendants"
+  );
+
+  parent.classList.remove("collapsed");
+  await new Promise(resolve => content.setTimeout(resolve));
+  Assert.equal(
+    list.rowCount,
+    9,
+    "directly expanding an attached row exposes its descendants"
+  );
+
+  newRow.classList.add("unselectable");
+  await new Promise(resolve => content.setTimeout(resolve));
+  Assert.equal(list.rowCount, 8, "an attached unselectable row is hidden");
+
+  newRow.classList.remove("unselectable");
+  await new Promise(resolve => content.setTimeout(resolve));
+  Assert.equal(list.rowCount, 9, "a selectable row becomes visible again");
+
+  // Warm the cache, then make full-tree selector calls observable. Arrow,
+  // Home, and End must navigate using cached rows and direct index lookups.
+  list.selectedIndex = 2;
+  let queryCount = 0;
+  const querySelectorAll = list.querySelectorAll;
+  list.querySelectorAll = function (...args) {
+    queryCount++;
+    return querySelectorAll.apply(this, args);
+  };
+  try {
+    EventUtils.synthesizeKey("KEY_ArrowDown", {}, content);
+    EventUtils.synthesizeKey("KEY_Home", {}, content);
+    EventUtils.synthesizeKey("KEY_End", {}, content);
+    await new Promise(resolve => content.setTimeout(resolve));
+    Assert.equal(
+      queryCount,
+      0,
+      "ordinary keyboard navigation performs no full-tree selector calls"
+    );
+  } finally {
+    delete list.querySelectorAll;
+  }
 }
 
 /**
