@@ -1149,8 +1149,16 @@ nsMsgLocalMailFolder::DeleteMessages(
         if (NS_SUCCEEDED(rv)) {
           // Second, remove the message entries from the DB.
           rv = msgStore->DeleteMessages(msgHeaders);
-          for (auto hdr : msgHeaders) {
-            rv = msgDB->DeleteHeader(hdr, nullptr, false, true);
+          if (NS_SUCCEEDED(rv)) {
+            for (auto hdr : msgHeaders) {
+              rv = msgDB->DeleteHeader(hdr, nullptr, false, true);
+              if (NS_FAILED(rv)) {
+                break;
+              }
+            }
+            if (NS_SUCCEEDED(rv)) {
+              rv = msgDB->Commit(nsMsgDBCommitType::kLargeCommit);
+            }
           }
         }
       } else if (rv == NS_MSG_FOLDER_BUSY) {

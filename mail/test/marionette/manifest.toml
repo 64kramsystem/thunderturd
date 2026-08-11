@@ -10,6 +10,9 @@ run-if = [
 
 ["test_compose_commandline.py"]
 
+["test_local_message_move.py"]
+run-if = ["os == 'linux'"]
+
 ["test_menubar_migration.py"]
 run-if = [
   "os != 'mac'",
