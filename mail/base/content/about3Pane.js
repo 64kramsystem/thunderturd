@@ -1061,7 +1061,6 @@ var folderPane = {
           // assigned to an account before creating folders on the server.
           throw new Error(`No parentRow for ${parentFolder.URI}`);
         }
-        folderTree.expandRow(parentRow);
         const childRow = folderPane._createFolderRow(this.name, childFolder);
         folderPane._addSubFolders(childFolder, childRow, "all");
         parentRow.insertChildInOrder(childRow);
