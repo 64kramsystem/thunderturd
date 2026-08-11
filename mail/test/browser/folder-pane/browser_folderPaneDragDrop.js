@@ -9,10 +9,14 @@
 
 "use strict";
 
-var { assert_folder_collapsed, assert_folder_expanded, collapse_folder } =
-  ChromeUtils.importESModule(
-    "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
-  );
+var {
+  assert_folder_collapsed,
+  assert_folder_expanded,
+  collapse_folder,
+  expand_folder,
+} = ChromeUtils.importESModule(
+  "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
+);
 var { inboxFolder } = ChromeUtils.importESModule(
   "resource://testing-common/mail/MessageInjectionHelpers.sys.mjs"
 );
@@ -33,6 +37,7 @@ add_setup(async function () {
   childFolder = inboxFolder.getChildNamed("ChildFolder");
   inboxFolder.server.rootFolder.createSubfolder("DragFolder", null);
   dragFolder = inboxFolder.server.rootFolder.getChildNamed("DragFolder");
+  expand_folder(inboxFolder.server.rootFolder);
 
   registerCleanupFunction(() => {
     inboxFolder.propagateDelete(childFolder, true);
@@ -146,4 +151,26 @@ add_task(async function dragAndDrop() {
 
   // The folder should still be expanded.
   assert_folder_expanded(inboxFolder);
+});
+
+/**
+ * Test that adding a folder beneath a collapsed parent does not reveal it by
+ * expanding the parent.
+ */
+add_task(async function addFolderKeepsParentCollapsed() {
+  const folderName = "AddedWhileCollapsed";
+  collapse_folder(inboxFolder);
+  assert_folder_collapsed(inboxFolder);
+
+  inboxFolder.createSubfolder(folderName, null);
+  const addedFolder = inboxFolder.getChildNamed(folderName);
+  try {
+    await TestUtils.waitForCondition(
+      () => about3Pane.folderPane.getRowForFolder(addedFolder),
+      "waiting for the added folder row"
+    );
+    assert_folder_collapsed(inboxFolder);
+  } finally {
+    inboxFolder.propagateDelete(addedFolder, true);
+  }
 });
