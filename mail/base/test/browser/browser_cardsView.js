@@ -8,7 +8,7 @@ const { MessageGenerator } = ChromeUtils.importESModule(
 const { click_through_appmenu } = ChromeUtils.importESModule(
   "resource://testing-common/mail/WindowHelpers.sys.mjs"
 );
-const { ensure_cards_view } = ChromeUtils.importESModule(
+const { ensure_cards_view, ensure_table_view } = ChromeUtils.importESModule(
   "resource://testing-common/MailViewHelpers.sys.mjs"
 );
 
@@ -43,6 +43,56 @@ add_setup(async function () {
     about3Pane.paneLayout.messagePaneVisible = true;
     about3Pane.folderTree.focus();
   });
+});
+
+add_task(async function testSelectionTransitionsAreInstant() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["ui.prefersReducedMotion", 0]],
+  });
+
+  await ensure_table_view(document);
+  const tableRow = threadTree.getRowAtIndex(0);
+  const tableRowTransitions = about3Pane
+    .getComputedStyle(tableRow)
+    .transitionProperty.split(", ");
+  for (const property of ["color", "background-color"]) {
+    Assert.ok(
+      !tableRowTransitions.includes(property),
+      `table row ${property} changes instantaneously`
+    );
+  }
+
+  const tableIconTransitions = about3Pane
+    .getComputedStyle(tableRow.querySelector(".tree-button-flag img"))
+    .transitionProperty.split(", ");
+  for (const property of ["color", "fill", "stroke"]) {
+    Assert.ok(
+      !tableIconTransitions.includes(property),
+      `table row icon ${property} changes instantaneously`
+    );
+  }
+
+  await ensure_cards_view(document);
+  const cardRow = threadTree.getRowAtIndex(0);
+  const cardContainerTransitions = about3Pane
+    .getComputedStyle(cardRow.querySelector(".card-container"))
+    .transitionProperty.split(", ");
+  for (const property of ["color", "background-color", "border-color"]) {
+    Assert.ok(
+      !cardContainerTransitions.includes(property),
+      `card container ${property} changes instantaneously`
+    );
+  }
+
+  const cardStarTransitions = about3Pane
+    .getComputedStyle(cardRow.querySelector(".button-star"))
+    .transitionProperty.split(", ");
+  for (const property of ["color", "fill", "stroke"]) {
+    Assert.ok(
+      !cardStarTransitions.includes(property),
+      `card row star ${property} changes instantaneously`
+    );
+  }
 });
 
 add_task(async function testSwitchToCardsView() {
