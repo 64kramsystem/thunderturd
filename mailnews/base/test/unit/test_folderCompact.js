@@ -241,6 +241,50 @@ add_task(async function testCompactAllFolders() {
   );
 });
 
+async function compactFolderWithInvalidSummary(folderName, removeSummary) {
+  const folder = localAccountUtils.rootFolder.createLocalSubfolder(folderName);
+  await copyFileMessage(do_get_file("../../../data/bugmail10"), folder, false);
+  await copyFileMessage(do_get_file("../../../data/bugmail11"), folder, false);
+
+  const messageToDelete = folder.messages.getNext();
+  await deleteMessages(folder, [messageToDelete]);
+
+  const expectedFolderSize = calculateExpectedMboxSize(folder);
+  const expectedMessageIds = Array.from(folder.messages, m => m.messageId);
+  Assert.greater(folder.expungedBytes, 0, "folder should need compaction");
+
+  folder.msgDatabase.summaryValid = false;
+  folder.msgDatabase = null;
+  folder.ForceDBClosed();
+  const summaryFile = folder.filePath;
+  summaryFile.leafName += ".msf";
+  if (removeSummary) {
+    summaryFile.remove(false);
+  }
+
+  const listener = new PromiseTestUtils.PromiseUrlListener();
+  folder.compactAll(listener, null);
+  await listener.promise;
+
+  Assert.ok(summaryFile.exists(), "summary file should be rebuilt");
+  Assert.ok(folder.msgDatabase.summaryValid, "rebuilt summary should be valid");
+  Assert.deepEqual(
+    Array.from(folder.messages, m => m.messageId),
+    expectedMessageIds,
+    "rebuilt summary should contain the retained messages"
+  );
+  await verifyMboxSize(folder, expectedFolderSize);
+  Assert.equal(folder.expungedBytes, 0, "folder should not need compaction");
+}
+
+add_task(async function testCompactFolderWithMissingSummary() {
+  await compactFolderWithInvalidSummary("missingSummary", true);
+});
+
+add_task(async function testCompactFolderWithOutdatedSummary() {
+  await compactFolderWithInvalidSummary("outdatedSummary", false);
+});
+
 add_task(async function testAbortCompactingFolder() {
   Services.fog.testResetFOG();
 

@@ -63,13 +63,14 @@ static void GUIShowDoneMsg(nsIMsgWindow* window, int64_t totalBytesRecovered);
  * keep, then use that each time asyncCompact() calls our
  * nsIStoreCompactListener.onRetentionQuery() method.
  */
-class FolderCompactor : public nsIStoreCompactListener {
+class FolderCompactor : public nsIStoreCompactListener, public nsIUrlListener {
  public:
   FolderCompactor() = delete;
-  explicit FolderCompactor(nsIMsgFolder* folder);
+  FolderCompactor(nsIMsgFolder* folder, nsIMsgWindow* window);
 
   NS_DECL_ISUPPORTS
   NS_DECL_NSISTORECOMPACTLISTENER
+  NS_DECL_NSIURLLISTENER
 
   // This kicks off the compaction.
   nsresult BeginCompacting(std::function<void(int)> progressFn,
@@ -90,6 +91,7 @@ class FolderCompactor : public nsIStoreCompactListener {
 
  private:
   virtual ~FolderCompactor();
+  nsresult StartCompacting();
 
   // Callbacks to invoke for progress and completion.
   std::function<void(int)> mProgressFn;
@@ -97,6 +99,7 @@ class FolderCompactor : public nsIStoreCompactListener {
 
   // The folder we're compacting.
   nsCOMPtr<nsIMsgFolder> mFolder;
+  nsCOMPtr<nsIMsgWindow> mWindow;
 
   // We need this in a couple of places, so hold onto it.
   nsCOMPtr<nsIMsgDBService> mDBService;
@@ -109,6 +112,9 @@ class FolderCompactor : public nsIStoreCompactListener {
 
   // Running total of kept messages (for progress feedback).
   uint32_t mNumKept{0};
+
+  bool mReparseAttempted{false};
+  bool mIgnoreReparseCallback{false};
 
   // Glean timer.
   uint64_t mTimerId{0};
@@ -143,15 +149,17 @@ class FolderCompactor : public nsIStoreCompactListener {
   } mPaths;
 };
 
-NS_IMPL_ISUPPORTS(FolderCompactor, nsIStoreCompactListener)
+NS_IMPL_ISUPPORTS(FolderCompactor, nsIStoreCompactListener, nsIUrlListener)
 
-FolderCompactor::FolderCompactor(nsIMsgFolder* folder) : mFolder(folder) {}
+FolderCompactor::FolderCompactor(nsIMsgFolder* folder, nsIMsgWindow* window)
+    : mFolder(folder), mWindow(window) {}
 
 FolderCompactor::~FolderCompactor() {
   // Should have already released folder in OnFinalSummary(), but
   // ReleaseSemaphore() is OK with being called even if we don't hold the
   // lock.
-  mFolder->ReleaseSemaphore(this, "FolderCompactor::~FolderCompactor"_ns);
+  mFolder->ReleaseSemaphore(static_cast<nsIStoreCompactListener*>(this),
+                            "FolderCompactor::~FolderCompactor"_ns);
 }
 
 nsresult FolderCompactor::BeginCompacting(
@@ -160,18 +168,25 @@ nsresult FolderCompactor::BeginCompacting(
   MOZ_ASSERT(mDB == nullptr);
   MOZ_ASSERT(mDBService == nullptr);
 
-  nsresult rv;
-
   mProgressFn = progressFn;
   mCompletionFn = completionFn;
 
-  MOZ_LOG(gCompactLog, LogLevel::Info,
-          ("BeginCompacting() folder='%s'", mFolder->URI().get()));
-
+  nsresult rv;
   mDBService = do_GetService("@mozilla.org/msgDatabase/msgDBService;1", &rv);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  rv = mFolder->AcquireSemaphore(this, "FolderCompactor::BeginCompacting"_ns);
+  return StartCompacting();
+}
+
+nsresult FolderCompactor::StartCompacting() {
+  MOZ_ASSERT(mDB == nullptr);
+
+  MOZ_LOG(gCompactLog, LogLevel::Info,
+          ("StartCompacting() folder='%s'", mFolder->URI().get()));
+
+  nsresult rv;
+  rv = mFolder->AcquireSemaphore(static_cast<nsIStoreCompactListener*>(this),
+                                 "FolderCompactor::StartCompacting"_ns);
   if (rv == NS_MSG_FOLDER_BUSY) {
     return rv;  // Semi-expected, don't want a warning message.
   }
@@ -179,13 +194,34 @@ nsresult FolderCompactor::BeginCompacting(
 
   // Just in case we exit early...
   auto guardSemaphore = mozilla::MakeScopeExit([&] {
-    mFolder->ReleaseSemaphore(this, "FolderCompactor::BeginCompacting"_ns);
+    mFolder->ReleaseSemaphore(static_cast<nsIStoreCompactListener*>(this),
+                              "FolderCompactor::StartCompacting"_ns);
   });
 
-  // If it's a local folder and the DB needs to be rebuilt, this will fail.
-  // That's OK. We shouldn't be here if the DB isn't ready to go.
   nsCOMPtr<nsIMsgDatabase> db;
   rv = mFolder->GetMsgDatabase(getter_AddRefs(db));
+  if (!mReparseAttempted && (rv == NS_MSG_ERROR_FOLDER_SUMMARY_MISSING ||
+                             rv == NS_MSG_ERROR_FOLDER_SUMMARY_OUT_OF_DATE)) {
+    nsCOMPtr<nsIMsgLocalMailFolder> localFolder = do_QueryInterface(mFolder);
+    if (localFolder) {
+      mReparseAttempted = true;
+      // StoreIndexer needs to acquire the same semaphore during parsing.
+      mFolder->ReleaseSemaphore(static_cast<nsIStoreCompactListener*>(this),
+                                "FolderCompactor::StartCompacting"_ns);
+      guardSemaphore.release();
+      rv = localFolder->GetDatabaseWithReparse(this, mWindow,
+                                               getter_AddRefs(db));
+      if (rv == NS_ERROR_NOT_INITIALIZED) {
+        return NS_OK;
+      }
+      if (NS_FAILED(rv)) {
+        // ParseFolder already schedules a listener callback on start failure.
+        mIgnoreReparseCallback = true;
+        return rv;
+      }
+      return StartCompacting();
+    }
+  }
   NS_ENSURE_SUCCESS(rv, rv);
   // There could be changes which aren't yet written to disk.
   rv = db->Commit(nsMsgDBCommitType::kLargeCommit);
@@ -315,6 +351,26 @@ nsresult FolderCompactor::BeginCompacting(
   guardSemaphore.release();
   guardNotification.release();
   return NS_OK;
+}
+
+NS_IMETHODIMP FolderCompactor::OnStartRunningUrl(nsIURI* url) { return NS_OK; }
+
+NS_IMETHODIMP FolderCompactor::OnStopRunningUrl(nsIURI* url, nsresult status) {
+  if (mIgnoreReparseCallback) {
+    return NS_OK;
+  }
+
+  RefPtr<FolderCompactor> self = this;
+  return NS_DispatchToCurrentThread(NS_NewRunnableFunction(
+      "FolderCompactor::OnStopRunningUrl", [self, status] {
+        nsresult rv = status;
+        if (NS_SUCCEEDED(rv)) {
+          rv = self->StartCompacting();
+        }
+        if (NS_FAILED(rv)) {
+          self->mCompletionFn(rv, 0);
+        }
+      }));
 }
 
 // Helper to estimate the extra diskspace required to compact a folder.
@@ -688,7 +744,8 @@ NS_IMETHODIMP FolderCompactor::OnFinalSummary(nsresult status, int64_t oldSize,
   mPaths.TempDir->Remove(false);  // Only if empty.
 
   // Release our lock on the folder.
-  mFolder->ReleaseSemaphore(this, "FolderCompactor::OnFinalSummary"_ns);
+  mFolder->ReleaseSemaphore(static_cast<nsIStoreCompactListener*>(this),
+                            "FolderCompactor::OnFinalSummary"_ns);
 
   if (NS_SUCCEEDED(status)) {
     // Need to set nsIMsgDatabase.summaryValid, but can't access DB via
@@ -957,7 +1014,7 @@ void BatchCompactor::StartNext() {
 
     // GO!
     RefPtr<FolderCompactor> compactor =
-        new FolderCompactor(mQueue.LastElement());
+        new FolderCompactor(mQueue.LastElement(), mWindow);
     nsresult rv = compactor->BeginCompacting(
         std::bind(&BatchCompactor::OnProgress, this, std::placeholders::_1),
         std::bind(&BatchCompactor::OnDone, this, std::placeholders::_1,

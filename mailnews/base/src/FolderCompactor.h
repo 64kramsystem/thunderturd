@@ -33,12 +33,8 @@ enum class nsresult : uint32_t;
  * - If any errors occur, the failing folder will be rolled back to it's
  *   previous state. Successfully compacted folders will stay compacted.
  *
- * This routine DOES NOT perform an expunge for IMAP folders, or attempt to
- * rebuild missing/out-of-date databases for local folders.
- * Previous compaction code did attempt to handle this, but it was
- * inconsistent and got very confusing. The folder-specific implementations
- * (e.g. nsImapMailFolder::Compact()) deal with that stuff _before_ calling
- * AsyncCompactFolders().
+ * This routine does not perform an expunge for IMAP folders. Missing or
+ * out-of-date databases for local folders are rebuilt before compaction.
  *
  * @param folders  - The folders to compact.
  * @param listener - Callback to invoke when operation is complete.
