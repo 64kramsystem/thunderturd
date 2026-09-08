@@ -1275,6 +1275,9 @@ nsImapProtocol::TellThreadToDie(bool aIsSafeToClose) {
     m_safeToCloseConnection = aIsSafeToClose;
     m_threadShouldDie = true;
   }
+  if (m_transport) {
+    m_transport->Close(NS_ERROR_ABORT);
+  }
   ReentrantMonitorAutoEnter readyMon(m_urlReadyToRunMonitor);
   m_nextUrlReadyToRun = true;
   readyMon.Notify();
