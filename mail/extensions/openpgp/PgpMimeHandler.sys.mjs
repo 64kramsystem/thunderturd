@@ -128,7 +128,7 @@ export class PgpMimeHandler {
 
         // otherwise just make sure message body is returned
         cth = lazy.EnigmailVerify.newVerifier(
-          "application/(x-)?pkcs7-signature"
+          lazy.EnigmailMime.getProtocol(ct).toLowerCase()
         );
       }
     }
