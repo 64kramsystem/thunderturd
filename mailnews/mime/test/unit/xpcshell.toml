@@ -61,6 +61,8 @@ run-sequentially = true  # Because it set's a pref that must not be active for o
 
 ["test_smime_perm_decrypt.js"]
 
+["test_smime_signed_nested_in_pgp.js"]
+
 ["test_structured_headers.js"]
 
 ["test_text_attachment.js"]
