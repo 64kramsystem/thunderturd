@@ -1246,8 +1246,6 @@ impl Device {
         desc: &resource::TextureDescriptor,
         initial_state: wgt::TextureUses,
     ) -> Result<Arc<Texture>, resource::CreateTextureError> {
-        self.check_is_valid()?;
-
         let format_features = self
             .describe_format_features(desc.format)
             .map_err(|error| resource::CreateTextureError::MissingFeatures(desc.format, error))?;
@@ -1375,29 +1373,10 @@ impl Device {
         }
     }
 
-    /// Validate a texture descriptor.
-    ///
-    /// This applies the same validation as [`Self::create_texture`], without
-    /// actually creating a texture.
-    pub fn validate_texture_descriptor(
+    pub fn create_texture(
         self: &Arc<Self>,
         desc: &resource::TextureDescriptor,
-    ) -> Result<(), resource::CreateTextureError> {
-        self.validate_texture_descriptor_inner(desc)?;
-        Ok(())
-    }
-
-    /// Validate a texture descriptor.
-    ///
-    /// Implements the [validating GPUTextureDescriptor] algorithm, with some
-    /// `wgpu` extensions.
-    ///
-    /// [validating GPUTextureDescriptor]: https://www.w3.org/TR/webgpu/#abstract-opdef-validating-gputexturedescriptor
-    fn validate_texture_descriptor_inner(
-        self: &Arc<Self>,
-        desc: &resource::TextureDescriptor,
-    ) -> Result<(wgt::TextureFormatFeatures, Vec<TextureFormat>), resource::CreateTextureError>
-    {
+    ) -> Result<Arc<Texture>, resource::CreateTextureError> {
         use resource::{CreateTextureError, TextureDimensionError};
 
         self.check_is_valid()?;
@@ -1648,15 +1627,6 @@ impl Device {
         if !hal_view_formats.is_empty() {
             self.require_downlevel_flags(wgt::DownlevelFlags::VIEW_FORMATS)?;
         }
-
-        Ok((format_features, hal_view_formats))
-    }
-
-    pub fn create_texture(
-        self: &Arc<Self>,
-        desc: &resource::TextureDescriptor,
-    ) -> Result<Arc<Texture>, resource::CreateTextureError> {
-        let (format_features, hal_view_formats) = self.validate_texture_descriptor_inner(desc)?;
 
         let hal_usage = conv::map_texture_usage_for_texture(desc, &format_features);
 
@@ -2825,22 +2795,6 @@ impl Device {
                 return Err(CreateBindGroupLayoutError::InvalidVisibility(
                     entry.visibility,
                 ));
-            }
-
-            if entry
-                .visibility
-                .intersects(wgt::ShaderStages::TASK | wgt::ShaderStages::MESH)
-            {
-                required_features |= wgt::Features::EXPERIMENTAL_MESH_SHADER;
-            }
-
-            if entry.visibility.intersects(
-                wgt::ShaderStages::RAY_GENERATION
-                    | wgt::ShaderStages::ANY_HIT
-                    | wgt::ShaderStages::CLOSEST_HIT
-                    | wgt::ShaderStages::MISS,
-            ) {
-                unreachable!("ray tracing pipelines");
             }
 
             if entry.visibility.contains(wgt::ShaderStages::VERTEX) {
@@ -5356,7 +5310,7 @@ impl Device {
         Some(error)
     }
 
-    pub(crate) fn lose(&self, message: &str) {
+    fn lose(&self, message: &str) {
         // Follow the steps at https://gpuweb.github.io/gpuweb/#lose-the-device.
 
         // Mark the device explicitly as invalid. This is checked in various

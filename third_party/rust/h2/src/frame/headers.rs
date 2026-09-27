@@ -6,15 +6,12 @@ use crate::hpack::{self, BytesStr};
 use http::header::{self, HeaderName, HeaderValue};
 use http::{uri, HeaderMap, Method, Request, StatusCode, Uri};
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use std::fmt;
 use std::io::Cursor;
-use std::ops::ControlFlow;
 
 type EncodeBuf<'a> = bytes::buf::Limit<&'a mut BytesMut>;
-
-const MAX_HEADER_LIST_ABUSE_MULTIPLIER: usize = 4;
 
 /// Header frame
 ///
@@ -104,7 +101,7 @@ struct HeaderBlock {
 
 #[derive(Debug)]
 struct EncodingHeaderBlock {
-    hpack: BytesMut,
+    hpack: Bytes,
 }
 
 const END_STREAM: u8 = 0x1;
@@ -287,7 +284,7 @@ impl Headers {
 
         self.header_block
             .into_encoding(encoder)
-            .encode(&head, dst, Some(encoder), |_| {})
+            .encode(&head, dst, |_| {})
     }
 
     fn head(&self) -> Head {
@@ -508,7 +505,7 @@ impl PushPromise {
 
         self.header_block
             .into_encoding(encoder)
-            .encode(&head, dst, Some(encoder), |dst| {
+            .encode(&head, dst, |dst| {
                 dst.put_u32(promised_id.into());
             })
     }
@@ -551,7 +548,7 @@ impl Continuation {
         // Get the CONTINUATION frame head
         let head = self.head();
 
-        self.header_block.encode(&head, dst, None, |_| {})
+        self.header_block.encode(&head, dst, |_| {})
     }
 }
 
@@ -647,13 +644,7 @@ impl Pseudo {
 // ===== impl EncodingHeaderBlock =====
 
 impl EncodingHeaderBlock {
-    fn encode<F>(
-        mut self,
-        head: &Head,
-        dst: &mut EncodeBuf<'_>,
-        encoder: Option<&mut hpack::Encoder>,
-        f: F,
-    ) -> Option<Continuation>
+    fn encode<F>(mut self, head: &Head, dst: &mut EncodeBuf<'_>, f: F) -> Option<Continuation>
     where
         F: FnOnce(&mut EncodeBuf<'_>),
     {
@@ -670,8 +661,7 @@ impl EncodingHeaderBlock {
 
         // Now, encode the header payload
         let continuation = if self.hpack.len() > dst.remaining_mut() {
-            let head_part = self.hpack.split_to(dst.remaining_mut());
-            dst.put_slice(&head_part);
+            dst.put((&mut self.hpack).take(dst.remaining_mut()));
 
             Some(Continuation {
                 stream_id: head.stream_id(),
@@ -679,11 +669,6 @@ impl EncodingHeaderBlock {
             })
         } else {
             dst.put_slice(&self.hpack);
-            // The block is fully written, so the buffer can be reused by the
-            // next frame on this connection.
-            if let Some(encoder) = encoder {
-                encoder.return_scratch(self.hpack);
-            }
 
             None
         };
@@ -867,26 +852,7 @@ impl HeaderBlock {
     ) -> Result<(), Error> {
         let mut reg = !self.fields.is_empty();
         let mut malformed = false;
-        let mut header_list_way_too_large = false;
         let mut headers_size = self.calculate_header_list_size();
-        let max_header_list_abuse_size =
-            max_header_list_size.saturating_mul(MAX_HEADER_LIST_ABUSE_MULTIPLIER);
-
-        macro_rules! check_size {
-            () => {{
-                if headers_size > max_header_list_abuse_size {
-                    tracing::trace!("load_hpack; header list size over abuse max");
-                    header_list_way_too_large = true;
-                    ControlFlow::Break(())
-                } else {
-                    if headers_size >= max_header_list_size && !self.is_over_size {
-                        tracing::trace!("load_hpack; header list size over max");
-                        self.is_over_size = true;
-                    }
-                    ControlFlow::Continue(())
-                }
-            }};
-        }
 
         macro_rules! set_pseudo {
             ($field:ident, $val:expr) => {{
@@ -900,11 +866,11 @@ impl HeaderBlock {
                     let __val = $val;
                     headers_size +=
                         decoded_header_size(stringify!($field).len() + 1, __val.as_str().len());
-                    if check_size!().is_break() {
-                        return ControlFlow::Break(());
-                    }
-                    if !self.is_over_size {
+                    if headers_size < max_header_list_size {
                         self.pseudo.$field = Some(__val);
+                    } else if !self.is_over_size {
+                        tracing::trace!("load_hpack; header list size over max");
+                        self.is_over_size = true;
                     }
                 }
             }};
@@ -941,19 +907,14 @@ impl HeaderBlock {
                     } else {
                         reg = true;
 
-                        let header_size = decoded_header_size(name.as_str().len(), value.len());
-                        headers_size += header_size;
-                        if check_size!().is_break() {
-                            return ControlFlow::Break(());
-                        }
-                        if !self.is_over_size {
-                            self.field_size += header_size;
-                            if let Err(_) = self.fields.try_append(name, value) {
-                                // HeaderMap capacity exceeded — treat as over-size
-                                // so the stream is rejected downstream (RST_STREAM / 431)
-                                // instead of panicking on the 24,577th unique header.
-                                self.is_over_size = true;
-                            }
+                        headers_size += decoded_header_size(name.as_str().len(), value.len());
+                        if headers_size < max_header_list_size {
+                            self.field_size +=
+                                decoded_header_size(name.as_str().len(), value.len());
+                            self.fields.append(name, value);
+                        } else if !self.is_over_size {
+                            tracing::trace!("load_hpack; header list size over max");
+                            self.is_over_size = true;
                         }
                     }
                 }
@@ -964,21 +925,11 @@ impl HeaderBlock {
                 Protocol(v) => set_pseudo!(protocol, v),
                 Status(v) => set_pseudo!(status, v),
             }
-
-            ControlFlow::Continue(())
         });
 
-        match res {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::trace!("hpack decoding error; err={:?}", e);
-                return Err(e.into());
-            }
-        }
-
-        if header_list_way_too_large {
-            tracing::trace!("header list way too large; aborting connection");
-            return Err(Error::HeaderListWayTooLarge);
+        if let Err(e) = res {
+            tracing::trace!("hpack decoding error; err={:?}", e);
+            return Err(e.into());
         }
 
         if malformed {
@@ -990,8 +941,7 @@ impl HeaderBlock {
     }
 
     fn into_encoding(self, encoder: &mut hpack::Encoder) -> EncodingHeaderBlock {
-        let mut hpack = encoder.take_scratch();
-        hpack.clear();
+        let mut hpack = BytesMut::new();
         let headers = Iter {
             pseudo: Some(self.pseudo),
             fields: self.fields.into_iter(),
@@ -999,7 +949,9 @@ impl HeaderBlock {
 
         encoder.encode(headers, &mut hpack);
 
-        EncodingHeaderBlock { hpack }
+        EncodingHeaderBlock {
+            hpack: hpack.freeze(),
+        }
     }
 
     /// Calculates the size of the currently decoded header list.
@@ -1215,90 +1167,6 @@ mod test {
                 path: BytesStr::from_static("*").into(),
                 ..Default::default()
             }
-        );
-    }
-
-    #[test]
-    fn test_try_append_prevents_panic_on_max_size_reached() {
-        // Verify that decoding >24,577 unique headers sets `is_over_size`
-        // instead of panicking via HeaderMap::append().
-        //
-        // HeaderMap::MAX_SIZE = 32,768. With 75% load factor, max entries = 24,576.
-        // try_append returns Err(MaxSizeReached) at entry 24,577.
-        // Before the fix (using append), this panicked.
-        //
-        // We manually construct HPACK bytes for 25,000 unique headers because
-        // creating a HeaderMap with that many entries also panics on construction.
-
-        // Build HPACK-encoded block:
-        // Pseudo-headers (indexed refs to static table):
-        //   :method GET         → 0x82 (static index 2)
-        //   :scheme http        → 0x86 (static index 6)
-        //   :path /             → 0x84 (static index 4)
-        //   :authority "localhost" → literal with indexing (name index 0)
-        //
-        // Then 25,000 unique headers: "literal without indexing, new name"
-        //   0x00 → literal without indexing, name index 0
-        //   <name_len> <name_bytes>
-        //   <value_len> <value_bytes>
-
-        let num_headers = 25_000;
-
-        // Build the HPACK block
-        let mut hpack = Vec::new();
-
-        // Pseudo-headers
-        hpack.push(0x82u8); // :method GET (static index 2)
-        hpack.push(0x86); // :scheme http (static index 6)
-        hpack.push(0x84); // :path / (static index 4)
-
-        // :authority "localhost" — literal with incremental indexing
-        hpack.push(0x41); // literal with indexing, name index 1 (= ":authority")
-        hpack.push(0x09); // value length 9
-        hpack.extend_from_slice(b"localhost");
-
-        // 25,000 unique headers: "literal without indexing, new name"
-        // Format: 0x00 + name_len + name + value_len + value
-        for i in 0..num_headers {
-            let name = format!("x-h-{i}");
-            hpack.push(0x00u8); // literal without indexing, name index 0
-            hpack.push(name.len() as u8);
-            hpack.extend_from_slice(name.as_bytes());
-            hpack.push(1u8); // value length 1
-            hpack.push(b'v');
-        }
-
-        // Build the HTTP/2 HEADERS frame: 9-byte header + HPACK payload
-        let payload_len = hpack.len();
-        let mut frame = BytesMut::with_capacity(9 + payload_len);
-
-        // Frame header: 3 bytes length, 1 byte type (0x01=HEADERS), 1 byte flags, 4 bytes stream_id
-        frame.put_u8(((payload_len >> 16) & 0xFF) as u8);
-        frame.put_u8(((payload_len >> 8) & 0xFF) as u8);
-        frame.put_u8((payload_len & 0xFF) as u8);
-        frame.put_u8(0x01); // type: HEADERS
-        frame.put_u8(0x04); // flags: END_HEADERS
-        frame.put_u32(1); // stream_id: 1
-
-        frame.extend_from_slice(&hpack);
-
-        // Parse the HEADERS frame
-        let head = Head::parse(&frame[..9]);
-        let payload = BytesMut::from(&frame[9..]);
-        let (mut headers, mut hpack_data) = Headers::load(head, payload).unwrap();
-        // hpack_data contains the HPACK payload (no padding/priority in our frame)
-
-        // Decode the HPACK block — this should NOT panic
-        let mut decoder = hpack::Decoder::new(4096);
-        const DEFAULT_MAX_HEADER_LIST_SIZE: usize = 16 << 20; // 16 MB
-        headers
-            .load_hpack(&mut hpack_data, DEFAULT_MAX_HEADER_LIST_SIZE, &mut decoder)
-            .expect("load_hpack should return Ok");
-
-        // Verify that is_over_size was set (try_append returned Err)
-        assert!(
-            headers.is_over_size(),
-            "is_over_size should be true when HeaderMap capacity is exceeded"
         );
     }
 

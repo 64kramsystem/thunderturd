@@ -7,7 +7,6 @@ use serde_json::Value;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::Cursor;
-use std::ops::ControlFlow;
 use std::path::Path;
 use std::str;
 
@@ -79,7 +78,6 @@ fn test_story(story: Value) {
                     let (name, value) = expect.remove(0);
                     assert_eq!(name, key_str(&e));
                     assert_eq!(value, value_str(&e));
-                    ControlFlow::Continue(())
                 })
                 .unwrap();
 
@@ -114,7 +112,6 @@ fn test_story(story: Value) {
             decoder
                 .decode(&mut Cursor::new(&mut buf), |e| {
                     assert_eq!(e, input.remove(0).reify().unwrap());
-                    ControlFlow::Continue(())
                 })
                 .unwrap();
 

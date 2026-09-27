@@ -160,9 +160,6 @@ pub enum Error {
     /// A request or response is malformed.
     MalformedMessage,
 
-    /// The decoded header list was too large to continue processing.
-    HeaderListWayTooLarge,
-
     /// An invalid stream dependency ID was provided
     ///
     /// This is returned if a HEADERS or PRIORITY frame is received with an
