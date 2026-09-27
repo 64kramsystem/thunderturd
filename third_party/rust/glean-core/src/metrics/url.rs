@@ -8,6 +8,7 @@ use crate::common_metric_data::CommonMetricDataInternal;
 use crate::error_recording::{record_error, test_get_num_recorded_errors, ErrorType};
 use crate::metrics::Metric;
 use crate::metrics::MetricType;
+use crate::storage::StorageManager;
 use crate::util::truncate_string_at_boundary_with_error;
 use crate::Glean;
 use crate::{CommonMetricData, TestGetValue};
@@ -114,11 +115,11 @@ impl UrlMetric {
             .into()
             .unwrap_or_else(|| &self.meta().inner.send_in_pings[0]);
 
-        match glean.storage().get_metric(
-            #[cfg(not(feature = "sqlite"))]
-            glean,
-            self.meta(),
+        match StorageManager.snapshot_metric(
+            glean.storage(),
             queried_ping_name,
+            &self.meta.identifier(glean),
+            self.meta.inner.lifetime,
         ) {
             Some(Metric::Url(s)) => Some(s),
             _ => None,
@@ -183,7 +184,8 @@ mod test {
             category: "test".into(),
             send_in_pings: vec!["store1".into()],
             lifetime: Lifetime::Application,
-            ..Default::default()
+            disabled: false,
+            dynamic_label: None,
         });
 
         let sample_url = "glean://test".to_string();
@@ -200,7 +202,8 @@ mod test {
             category: "test".into(),
             send_in_pings: vec!["store1".into()],
             lifetime: Lifetime::Application,
-            ..Default::default()
+            disabled: false,
+            dynamic_label: None,
         });
 
         // Whenever the URL is longer than our MAX_URL_LENGTH, we truncate the URL to the
@@ -238,8 +241,7 @@ mod test {
             send_in_pings: vec!["store1".into()],
             lifetime: Lifetime::Application,
             disabled: false,
-            label: None,
-            in_session: false,
+            dynamic_label: None,
         });
 
         let test_url = "data:application/json";
@@ -262,7 +264,8 @@ mod test {
             category: "test".into(),
             send_in_pings: vec!["store1".into()],
             lifetime: Lifetime::Application,
-            ..Default::default()
+            disabled: false,
+            dynamic_label: None,
         });
 
         let incorrects = vec![

@@ -31,7 +31,10 @@ impl core::fmt::Display for SerializationStrategy {
     }
 }
 
-impl core::error::Error for SerializationStrategy {}
+#[cfg(feature = "std")]
+impl std::error::Error for SerializationStrategy {}
+#[cfg(not(feature = "std"))]
+impl serde_core::de::StdError for SerializationStrategy {}
 
 struct WalkValue;
 

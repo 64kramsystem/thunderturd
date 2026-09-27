@@ -6,7 +6,7 @@ use crate::de::{DeArray, DeValue};
 
 use crate::de::parser::prelude::*;
 
-/// ```abnf
+/// ```bnf
 /// ;; Array
 ///
 /// array = array-open array-values array-close

@@ -15,7 +15,6 @@ use crate::{
 };
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec, vec::Vec};
 use core::{mem::size_of, num::NonZeroU64};
-use scopeguard::{guard, ScopeGuard};
 use wgt::Limits;
 
 /// Note: This needs to be under:
@@ -73,9 +72,6 @@ impl Draw {
         assert!(limits.max_buffer_size <= u32::MAX as u64);
 
         let module = create_validation_module(device, instance_flags)?;
-        let module = guard(module, |module| unsafe {
-            device.destroy_shader_module(module)
-        });
 
         let metadata_bind_group_layout = create_bind_group_layout(
             device,
@@ -87,10 +83,6 @@ impl Draw {
                 instance_flags,
             ),
         )?;
-        let metadata_bind_group_layout = guard(metadata_bind_group_layout, |bgl| unsafe {
-            device.destroy_bind_group_layout(bgl)
-        });
-
         let src_bind_group_layout = create_bind_group_layout(
             device,
             true,
@@ -101,10 +93,6 @@ impl Draw {
                 instance_flags,
             ),
         )?;
-        let src_bind_group_layout = guard(src_bind_group_layout, |bgl| unsafe {
-            device.destroy_bind_group_layout(bgl)
-        });
-
         let dst_bind_group_layout = create_bind_group_layout(
             device,
             false,
@@ -115,9 +103,6 @@ impl Draw {
                 instance_flags,
             ),
         )?;
-        let dst_bind_group_layout = guard(dst_bind_group_layout, |bgl| unsafe {
-            device.destroy_bind_group_layout(bgl)
-        });
 
         let pipeline_layout_desc = hal::PipelineLayoutDescriptor {
             label: hal_label(
@@ -137,9 +122,6 @@ impl Draw {
                 .create_pipeline_layout(&pipeline_layout_desc)
                 .map_err(DeviceError::from_hal)?
         };
-        let pipeline_layout = guard(pipeline_layout, |pipeline_layout| unsafe {
-            device.destroy_pipeline_layout(pipeline_layout)
-        });
 
         let supports_indirect_first_instance =
             required_features.contains(wgt::Features::INDIRECT_FIRST_INSTANCE);
@@ -152,19 +134,14 @@ impl Draw {
             write_d3d12_special_constants,
             instance_flags,
         )?;
-        let pipeline = guard(pipeline, |pipeline| unsafe {
-            device.destroy_compute_pipeline(pipeline)
-        });
 
-        // Error returns after we start consuming guards could bypass resource cleanup.
-        #[deny(clippy::question_mark_used)]
         Ok(Self {
-            module: ScopeGuard::into_inner(module),
-            metadata_bind_group_layout: ScopeGuard::into_inner(metadata_bind_group_layout),
-            src_bind_group_layout: ScopeGuard::into_inner(src_bind_group_layout),
-            dst_bind_group_layout: ScopeGuard::into_inner(dst_bind_group_layout),
-            pipeline_layout: ScopeGuard::into_inner(pipeline_layout),
-            pipeline: ScopeGuard::into_inner(pipeline),
+            module,
+            metadata_bind_group_layout,
+            src_bind_group_layout,
+            dst_bind_group_layout,
+            pipeline_layout,
+            pipeline,
 
             free_indirect_entries: Mutex::new(rank::BUFFER_POOL, Vec::new()),
             free_metadata_entries: Mutex::new(rank::BUFFER_POOL, Vec::new()),
@@ -570,7 +547,7 @@ fn create_validation_module(
         CreateShaderModuleError::Validation(naga::error::ShaderError {
             source: src.to_string(),
             label: None,
-            inner,
+            inner: Box::new(inner),
         })
     })?;
     let hal_shader = hal::ShaderInput::Naga(hal::NagaShader {

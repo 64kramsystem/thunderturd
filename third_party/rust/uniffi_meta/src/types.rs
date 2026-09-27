@@ -17,26 +17,16 @@
 //! about how these API-level types map into the lower-level types of the FFI layer as represented
 //! by the [`ffi::FfiType`](super::ffi::FfiType) enum, but that's a detail that is invisible to end users.
 
-use crate::Checksum;
-use uniffi_pipeline::{MapNode, Node};
+use crate::{Checksum, Node};
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Checksum, Ord, PartialOrd, Node, MapNode)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Checksum, Ord, PartialOrd, Node)]
 pub enum ObjectImpl {
     // A single Rust type
     Struct,
-    // A trait, with the kind controlling who can export implementations
-    Trait(TraitKind),
-}
-
-/// Controls who can provide implementations of an exported trait
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Checksum, Ord, PartialOrd, Node, MapNode)]
-pub enum TraitKind {
-    /// Only Rust types implement this trait
-    RustOnly,
-    /// Both Rust and foreign types can implement this trait
-    Both,
-    /// Only foreign types implement this trait (Arc-based)
-    ForeignOnly,
+    // A trait that's can be implemented by Rust types
+    Trait,
+    // A trait + a callback interface -- can be implemented by both Rust and foreign types.
+    CallbackTrait,
 }
 
 impl ObjectImpl {
@@ -53,34 +43,18 @@ impl ObjectImpl {
     }
 
     pub fn is_trait_interface(&self) -> bool {
-        matches!(self, Self::Trait(_))
+        matches!(self, Self::Trait | Self::CallbackTrait)
     }
 
     pub fn has_callback_interface(&self) -> bool {
-        matches!(self, Self::Trait(TraitKind::Both | TraitKind::ForeignOnly))
-    }
-
-    pub fn has_struct(&self) -> bool {
-        matches!(self, Self::Struct)
-    }
-}
-
-impl TraitKind {
-    /// True if foreign code can implement this trait
-    pub fn has_foreign(&self) -> bool {
-        matches!(self, Self::Both | Self::ForeignOnly)
-    }
-
-    /// True if Rust code can implement this trait
-    pub fn has_rust(&self) -> bool {
-        matches!(self, Self::RustOnly | Self::Both)
+        matches!(self, Self::CallbackTrait)
     }
 }
 
 /// Represents all the different high-level types that can be used in a component interface.
 /// At this level we identify user-defined types by name, without knowing any details
 /// of their internal structure apart from what type of thing they are (record, enum, etc).
-#[derive(Debug, Clone, Eq, PartialEq, Checksum, Ord, PartialOrd)]
+#[derive(Debug, Clone, Eq, PartialEq, Checksum, Ord, PartialOrd, Node)]
 pub enum Type {
     // Primitive types.
     UInt8,
@@ -119,12 +93,7 @@ pub enum Type {
         module_path: String,
         name: String,
     },
-    /// Used for a Box<T> type.
-    /// This only matters for scaffolding generation.
-    /// Bindings can ignore this and just use the inner type.
-    Box {
-        inner_type: Box<Type>,
-    },
+    // Structurally recursive types.
     Optional {
         inner_type: Box<Type>,
     },
@@ -134,9 +103,6 @@ pub enum Type {
     Map {
         key_type: Box<Type>,
         value_type: Box<Type>,
-    },
-    Set {
-        inner_type: Box<Type>,
     },
     // Custom type on the scaffolding side
     Custom {
@@ -155,9 +121,9 @@ impl Type {
     // iterate over all types contained in the type but *not including self*.
     pub fn iter_nested_types(&self) -> TypeIterator<'_> {
         match self {
-            Type::Optional { inner_type }
-            | Type::Sequence { inner_type }
-            | Type::Set { inner_type } => inner_type.iter_types(),
+            Type::Optional { inner_type } | Type::Sequence { inner_type } => {
+                inner_type.iter_types()
+            }
             Type::Map {
                 key_type,
                 value_type,
@@ -213,9 +179,7 @@ impl Type {
 
         // Recursively rename nested types
         match self {
-            Type::Optional { inner_type }
-            | Type::Sequence { inner_type }
-            | Type::Set { inner_type } => {
+            Type::Optional { inner_type } | Type::Sequence { inner_type } => {
                 inner_type.rename_recursive(name_transformer);
             }
             Type::Map {

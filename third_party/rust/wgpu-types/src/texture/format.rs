@@ -924,8 +924,7 @@ impl TextureFormat {
         // Flags
         let basic =
             TextureUsages::COPY_SRC | TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
-        let attachment =
-            basic | TextureUsages::RENDER_ATTACHMENT | TextureUsages::TRANSIENT_ATTACHMENT;
+        let attachment = basic | TextureUsages::RENDER_ATTACHMENT | TextureUsages::TRANSIENT;
         let storage = basic | TextureUsages::STORAGE_BINDING;
         let binding = TextureUsages::TEXTURE_BINDING;
         let all_flags = attachment | storage | binding;
@@ -1568,12 +1567,7 @@ impl TextureFormat {
         }
     }
 
-    /// Changes `*UnormSrgb` texture formats to `*Unorm`.
-    ///
-    /// Given a texture format which implicitly performs sRGB decoding when read in shaders and
-    /// encoding when written to as a render target, this returns the corresponding `Unorm` format
-    /// which performs only linear scaling.
-    /// All other formats are returned unchanged.
+    /// Strips the `Srgb` suffix from the given texture format.
     #[must_use]
     pub fn remove_srgb_suffix(&self) -> TextureFormat {
         match *self {
@@ -1597,11 +1591,7 @@ impl TextureFormat {
         }
     }
 
-    /// Changes `*Unorm` texture formats to `*UnormSrgb`.
-    ///
-    /// Given a `Unorm` texture format, this returns a texture format which implicitly performs sRGB
-    /// decoding when read in shaders and encoding when written to as a render target.
-    /// All other formats are returned unchanged.
+    /// Adds an `Srgb` suffix to the given texture format, if the format supports it.
     #[must_use]
     pub fn add_srgb_suffix(&self) -> TextureFormat {
         match *self {
@@ -1625,14 +1615,9 @@ impl TextureFormat {
         }
     }
 
-    /// Returns `true` for `*Srgb` formats: those which, when read by a shader, automatically apply
-    /// sRGB decoding, and when written to as a render target, automatically apply sRGB encoding.
-    ///
-    /// This does not relate to whether or not the contents of the texture are expected to be in
-    /// the sRGB color space; that is determined by how it is used (in the case of surface
-    /// textures, by the [`SurfaceColorSpace`][crate::SurfaceColorSpace]).
+    /// Returns `true` for srgb formats.
     #[must_use]
-    pub fn has_srgb_suffix(&self) -> bool {
+    pub fn is_srgb(&self) -> bool {
         *self != self.remove_srgb_suffix()
     }
 

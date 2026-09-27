@@ -2,8 +2,6 @@
 // Copyright by contributors to this project.
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
-use alloc::vec::Vec;
-
 use crate::group::{proposal_filter::ProposalBundle, Roster};
 
 #[cfg(feature = "private_message")]
@@ -14,14 +12,7 @@ use crate::{
 
 use alloc::boxed::Box;
 use core::convert::Infallible;
-use mls_rs_core::{
-    error::IntoAnyError,
-    group::{Member, ProposalType},
-    identity::SigningIdentity,
-};
-
-#[cfg(feature = "custom_proposal")]
-use crate::group::proposal::CustomProposal;
+use mls_rs_core::{error::IntoAnyError, group::Member, identity::SigningIdentity};
 
 use super::GroupContext;
 
@@ -193,29 +184,10 @@ pub trait MlsRules: Send + Sync {
         current_roster: &Roster,
         current_context: &GroupContext,
     ) -> Result<EncryptionOptions, Self::Error>;
-
-    /// Returns whether a commit containing a custom proposal of the given type must include an
-    /// update path.
-    ///
-    /// Per RFC 9420 §12.4, a proposal type "requires a path" when it changes group membership in a
-    /// way that needs the forward secrecy and post-compromise security guarantees an UpdatePath
-    /// provides. The standard proposal types that do *not* require a path are Add, PSK, and
-    /// ReInit. For custom proposal types, this method lets the application decide.
-    ///
-    /// This is called during commit creation and validation for every custom proposal in the
-    /// commit. If any custom proposal returns `true`, a generated commit will include, or
-    /// a received commit will require an update path.
-    ///
-    /// The default implementation returns `true` (conservative: always require a path).
-    #[cfg(feature = "custom_proposal")]
-    fn custom_proposal_requires_update_path(&self, _proposal: &CustomProposal) -> bool {
-        true
-    }
 }
 
 macro_rules! delegate_mls_rules {
     ($implementer:ty) => {
-        #[cfg_attr(coverage_nightly, coverage(off))]
         #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
         #[cfg_attr(mls_build_async, maybe_async::must_be_async)]
         impl<T: MlsRules + ?Sized> MlsRules for $implementer {
@@ -251,11 +223,6 @@ macro_rules! delegate_mls_rules {
             ) -> Result<EncryptionOptions, Self::Error> {
                 (**self).encryption_options(roster, context)
             }
-
-            #[cfg(feature = "custom_proposal")]
-            fn custom_proposal_requires_update_path(&self, proposal: &CustomProposal) -> bool {
-                (**self).custom_proposal_requires_update_path(proposal)
-            }
         }
     };
 }
@@ -269,7 +236,6 @@ delegate_mls_rules!(&T);
 pub struct DefaultMlsRules {
     pub commit_options: CommitOptions,
     pub encryption_options: EncryptionOptions,
-    pub custom_proposals_that_require_update_path: Vec<ProposalType>,
 }
 
 impl DefaultMlsRules {
@@ -283,25 +249,15 @@ impl DefaultMlsRules {
     pub fn with_commit_options(self, commit_options: CommitOptions) -> Self {
         Self {
             commit_options,
-            ..self
+            encryption_options: self.encryption_options,
         }
     }
 
     /// Set encryption options.
     pub fn with_encryption_options(self, encryption_options: EncryptionOptions) -> Self {
         Self {
+            commit_options: self.commit_options,
             encryption_options,
-            ..self
-        }
-    }
-
-    pub fn with_custom_proposals_that_require_update_path(
-        self,
-        custom_proposals_that_require_update_path: Vec<ProposalType>,
-    ) -> Self {
-        Self {
-            custom_proposals_that_require_update_path,
-            ..self
         }
     }
 }
@@ -337,11 +293,5 @@ impl MlsRules for DefaultMlsRules {
         _: &GroupContext,
     ) -> Result<EncryptionOptions, Self::Error> {
         Ok(self.encryption_options)
-    }
-
-    #[cfg(feature = "custom_proposal")]
-    fn custom_proposal_requires_update_path(&self, proposal: &CustomProposal) -> bool {
-        self.custom_proposals_that_require_update_path
-            .contains(&proposal.proposal_type())
     }
 }

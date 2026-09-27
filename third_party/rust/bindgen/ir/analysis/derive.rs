@@ -189,6 +189,7 @@ impl CannotDerive<'_> {
         match *ty.kind() {
             // Handle the simple cases. These can derive traits without further
             // information.
+            TypeKind::Void |
             TypeKind::NullPtr |
             TypeKind::Int(..) |
             TypeKind::Complex(..) |
@@ -212,7 +213,6 @@ impl CannotDerive<'_> {
             TypeKind::Function(ref sig) => {
                 self.derive_trait.can_derive_fnptr(sig)
             }
-            TypeKind::Void => CanDerive::No,
 
             // Complex cases need more information
             TypeKind::Array(t, len) => {
@@ -477,7 +477,7 @@ impl DeriveTrait {
     }
 
     fn can_derive_compound_forward_decl(self) -> bool {
-        matches!(self, DeriveTrait::Debug)
+        matches!(self, DeriveTrait::Copy | DeriveTrait::Debug)
     }
 
     fn can_derive_incomplete_array(self) -> bool {
@@ -534,6 +534,7 @@ impl DeriveTrait {
             // === Default ===
             (
                 DeriveTrait::Default,
+                TypeKind::Void |
                 TypeKind::NullPtr |
                 TypeKind::Enum(..) |
                 TypeKind::Reference(..) |

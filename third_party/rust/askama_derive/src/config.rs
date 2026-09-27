@@ -1,8 +1,8 @@
 use std::borrow::{Borrow, Cow};
-use std::collections::hash_map::Entry;
+use std::collections::btree_map::{BTreeMap, Entry};
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
-use std::path::{Path, PathBuf, absolute};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::{env, fs};
 
@@ -12,12 +12,12 @@ use proc_macro2::Span;
 #[cfg(feature = "config")]
 use serde_derive::Deserialize;
 
-use crate::{CompileError, FileInfo, HashMap, OnceMap};
+use crate::{CompileError, FileInfo, OnceMap};
 
 #[derive(Debug)]
 pub(crate) struct Config {
     pub(crate) dirs: Vec<PathBuf>,
-    pub(crate) syntaxes: HashMap<String, SyntaxAndCache>,
+    pub(crate) syntaxes: BTreeMap<String, SyntaxAndCache<'static>>,
     pub(crate) default_syntax: &'static str,
     pub(crate) escapers: Vec<(Vec<Cow<'static, str>>, Cow<'static, str>)>,
     pub(crate) whitespace: Whitespace,
@@ -93,7 +93,9 @@ impl Config {
             |config| *config,
         )
     }
+}
 
+impl Config {
     fn new_uncached(
         key: OwnedConfigKey,
         config_span: Option<Span>,
@@ -105,7 +107,7 @@ impl Config {
 
         let default_dirs = vec![root.join("templates")];
 
-        let mut syntaxes = HashMap::default();
+        let mut syntaxes = BTreeMap::new();
         syntaxes.insert(DEFAULT_SYNTAX_NAME.to_string(), SyntaxAndCache::default());
 
         let raw = if s.is_empty() {
@@ -121,9 +123,7 @@ impl Config {
                 whitespace,
             }) => (
                 dirs.map_or(default_dirs, |v| {
-                    v.into_iter()
-                        .flat_map(|dir| get_config_dirs(root, dir))
-                        .collect()
+                    v.into_iter().map(|dir| root.join(dir)).collect()
                 }),
                 default_syntax.unwrap_or(DEFAULT_SYNTAX_NAME),
                 whitespace,
@@ -139,7 +139,7 @@ impl Config {
                 match syntaxes.entry(name.to_string()) {
                     Entry::Vacant(entry) => {
                         entry.insert(raw_s.to_syntax().map(SyntaxAndCache::new).map_err(
-                            |err| CompileError::new_with_span_stable(err, file_info, config_span),
+                            |err| CompileError::new_with_span(err, file_info, config_span),
                         )?);
                     }
                     Entry::Occupied(_) => {
@@ -188,7 +188,6 @@ impl Config {
         path: &str,
         start_at: Option<&Path>,
         file_info: Option<FileInfo<'_>>,
-        span: Option<proc_macro2::Span>,
     ) -> Result<Arc<Path>, CompileError> {
         let path = 'find_path: {
             if let Some(root) = start_at {
@@ -203,78 +202,33 @@ impl Config {
                     break 'find_path rooted;
                 }
             }
-            return Err(CompileError::new_with_span(
+            return Err(CompileError::new(
                 format_args!(
                     "template {:?} not found in directories {:?}",
                     path, self.dirs,
                 ),
                 file_info,
-                span,
             ));
         };
-        match absolute(&path) {
+        match path.canonicalize() {
             Ok(path) => Ok(path.into()),
-            Err(err) => Err(CompileError::new_with_span(
-                format_args!("could not get absolute path for {path:?}: {err}"),
+            Err(err) => Err(CompileError::new(
+                format_args!("could not canonicalize path {path:?}: {err}"),
                 file_info,
-                span,
             )),
         }
     }
 }
 
-#[cfg(not(feature = "config"))]
-fn get_config_dirs(_root: &Path, _dir: &str) -> impl Iterator<Item = PathBuf> {
-    std::iter::empty()
-}
-
-#[cfg(feature = "config")]
-fn get_config_dirs(root: &Path, dir: &str) -> impl Iterator<Item = PathBuf> {
-    let path = root.join(dir);
-    if dir.contains('*')
-        && let Some(path) = path.to_str()
-        && let Ok(matches) = glob::glob(path)
-    {
-        PathOrPaths::Paths(matches)
-    } else {
-        PathOrPaths::Path(Some(path))
-    }
-}
-
-#[cfg(feature = "config")]
-enum PathOrPaths {
-    Paths(glob::Paths),
-    Path(Option<PathBuf>),
-}
-
-#[cfg(feature = "config")]
-impl Iterator for PathOrPaths {
-    type Item = PathBuf;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Paths(paths) => loop {
-                if let Ok(path) = paths.next()?
-                    && path.is_dir()
-                {
-                    return Some(path);
-                }
-            },
-            Self::Path(path) => path.take(),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
-pub(crate) struct SyntaxAndCache {
-    syntax: Syntax<'static>,
+pub(crate) struct SyntaxAndCache<'a> {
+    syntax: Syntax<'a>,
     cache: OnceMap<OwnedSyntaxAndCacheKey, Arc<Parsed>>,
 }
 
-impl Deref for SyntaxAndCache {
-    type Target = Syntax<'static>;
+impl<'a> Deref for SyntaxAndCache<'a> {
+    type Target = Syntax<'a>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.syntax
     }
@@ -286,7 +240,6 @@ struct OwnedSyntaxAndCacheKey(SyntaxAndCacheKey<'static>);
 impl Deref for OwnedSyntaxAndCacheKey {
     type Target = SyntaxAndCacheKey<'static>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -304,8 +257,8 @@ impl<'a> Borrow<SyntaxAndCacheKey<'a>> for OwnedSyntaxAndCacheKey {
     }
 }
 
-impl SyntaxAndCache {
-    fn new(syntax: Syntax<'static>) -> Self {
+impl<'a> SyntaxAndCache<'a> {
+    fn new(syntax: Syntax<'a>) -> Self {
         Self {
             syntax,
             cache: OnceMap::default(),
@@ -433,7 +386,7 @@ static DEFAULT_ESCAPERS: &[(&[&str], &str)] = &[
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf, absolute};
+    use std::path::{Path, PathBuf};
 
     use super::*;
 
@@ -449,43 +402,18 @@ mod tests {
     #[test]
     fn test_config_dirs() {
         let mut root = manifest_root();
-        root.push("tpl");
+        root = root.join("tpl");
         let config = Config::new("[general]\ndirs = [\"tpl\"]", None, None, None, None).unwrap();
         assert_eq!(config.dirs, vec![root]);
     }
 
-    #[cfg(feature = "config")]
-    #[test]
-    fn test_config_dirs_glob() {
-        let root = manifest_root();
-        let config = Config::new(
-            "[general]\ndirs = [\"templates/*\"]",
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        // We ensure that it includes only top level folders.
-        assert_eq!(config.dirs, vec![root.join("templates/sub")]);
-
-        let config = Config::new(
-            "[general]\ndirs = [\"templates/**\"]",
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        // We ensure that it includes top level and sub-folders.
-        assert_eq!(
-            config.dirs,
-            vec![root.join("templates/sub"), root.join("templates/sub/sub1")]
-        );
-    }
-
     fn assert_eq_rooted(actual: &Path, expected: &str) {
-        let mut root = absolute(manifest_root()).unwrap();
+        let mut root = manifest_root().canonicalize().unwrap();
+        if root.ends_with("askama_derive_standalone") {
+            root.pop();
+            root.push("askama_derive");
+        }
+
         root.push("templates");
         let mut inner = PathBuf::new();
         inner.push(expected);
@@ -495,9 +423,9 @@ mod tests {
     #[test]
     fn find_absolute() {
         let config = Config::new("", None, None, None, None).unwrap();
-        let root = config.find_template("a.html", None, None, None).unwrap();
+        let root = config.find_template("a.html", None, None).unwrap();
         let path = config
-            .find_template("sub/b.html", Some(&root), None, None)
+            .find_template("sub/b.html", Some(&root), None)
             .unwrap();
         assert_eq_rooted(&path, "sub/b.html");
     }
@@ -506,32 +434,24 @@ mod tests {
     #[should_panic]
     fn find_relative_nonexistent() {
         let config = Config::new("", None, None, None, None).unwrap();
-        let root = config.find_template("a.html", None, None, None).unwrap();
-        config
-            .find_template("c.html", Some(&root), None, None)
-            .unwrap();
+        let root = config.find_template("a.html", None, None).unwrap();
+        config.find_template("c.html", Some(&root), None).unwrap();
     }
 
     #[test]
     fn find_relative() {
         let config = Config::new("", None, None, None, None).unwrap();
-        let root = config
-            .find_template("sub/b.html", None, None, None)
-            .unwrap();
-        let path = config
-            .find_template("c.html", Some(&root), None, None)
-            .unwrap();
+        let root = config.find_template("sub/b.html", None, None).unwrap();
+        let path = config.find_template("c.html", Some(&root), None).unwrap();
         assert_eq_rooted(&path, "sub/c.html");
     }
 
     #[test]
     fn find_relative_sub() {
         let config = Config::new("", None, None, None, None).unwrap();
-        let root = config
-            .find_template("sub/b.html", None, None, None)
-            .unwrap();
+        let root = config.find_template("sub/b.html", None, None).unwrap();
         let path = config
-            .find_template("sub1/d.html", Some(&root), None, None)
+            .find_template("sub1/d.html", Some(&root), None)
             .unwrap();
         assert_eq_rooted(&path, "sub/sub1/d.html");
     }

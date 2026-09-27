@@ -89,7 +89,6 @@ mod error;
 mod integer;
 mod uid;
 mod value;
-mod macros;
 
 #[cfg(feature = "serde")]
 pub use data::Data;
@@ -134,5 +133,9 @@ extern crate serde_derive;
 mod serde_tests;
 
 fn u64_to_usize(len_u64: u64) -> Option<usize> {
-    usize::try_from(len_u64).ok()
+    let len = len_u64 as usize;
+    if len as u64 != len_u64 {
+        return None; // Too long
+    }
+    Some(len)
 }

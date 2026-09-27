@@ -569,11 +569,6 @@ impl ContextOps for PulseContext {
         cb: ffi::cubeb_device_collection_changed_callback,
         user_ptr: *mut c_void,
     ) -> Result<()> {
-        let old_input_cb = self.input_collection_changed_callback;
-        let old_input_ptr = self.input_collection_changed_user_ptr;
-        let old_output_cb = self.output_collection_changed_callback;
-        let old_output_ptr = self.output_collection_changed_user_ptr;
-
         if devtype.contains(DeviceType::INPUT) {
             self.input_collection_changed_callback = cb;
             self.input_collection_changed_user_ptr = user_ptr;
@@ -594,19 +589,7 @@ impl ContextOps for PulseContext {
          * `default_sink_info` when the default device changes. */
         mask |= pulse::SubscriptionMask::SERVER;
 
-        if let Err(e) = self.subscribe_notifications(mask) {
-            if devtype.contains(DeviceType::INPUT) {
-                self.input_collection_changed_callback = old_input_cb;
-                self.input_collection_changed_user_ptr = old_input_ptr;
-            }
-            if devtype.contains(DeviceType::OUTPUT) {
-                self.output_collection_changed_callback = old_output_cb;
-                self.output_collection_changed_user_ptr = old_output_ptr;
-            }
-            return Err(e);
-        }
-
-        Ok(())
+        self.subscribe_notifications(mask)
     }
 }
 

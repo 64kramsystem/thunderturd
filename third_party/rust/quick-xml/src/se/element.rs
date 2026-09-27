@@ -5,11 +5,12 @@ use crate::se::content::ContentSerializer;
 use crate::se::key::QNameSerializer;
 use crate::se::simple_type::{QuoteTarget, SimpleSeq, SimpleTypeSerializer};
 use crate::se::text::TextSerializer;
-use crate::se::{EmptyElementHandling, SeError, WriteResult, XmlName};
+use crate::se::{SeError, WriteResult, XmlName};
 use serde::ser::{
     Impossible, Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
     SerializeTuple, SerializeTupleStruct, SerializeTupleVariant, Serializer,
 };
+use serde::serde_if_integer128;
 use std::fmt::Write;
 
 /// Writes simple type content between [`ElementSerializer::key`] tags.
@@ -55,7 +56,7 @@ macro_rules! write_primitive {
 ///   - unit variants are serialized as `<key>variant</key>`;
 ///   - other variants are not supported ([`SeError::Unsupported`] is returned);
 ///
-/// Usage of empty tags depends on the [`ContentSerializer::empty_element_handling`] setting.
+/// Usage of empty tags depends on the [`ContentSerializer::expand_empty_elements`] setting.
 pub struct ElementSerializer<'w, 'k, W: Write> {
     /// The inner serializer that contains the settings and mostly do the actual work
     pub ser: ContentSerializer<'w, 'k, W>,
@@ -87,8 +88,10 @@ impl<'w, 'k, W: Write> Serializer for ElementSerializer<'w, 'k, W> {
     write_primitive!(serialize_u32(u32));
     write_primitive!(serialize_u64(u64));
 
-    write_primitive!(serialize_i128(i128));
-    write_primitive!(serialize_u128(u128));
+    serde_if_integer128! {
+        write_primitive!(serialize_i128(i128));
+        write_primitive!(serialize_u128(u128));
+    }
 
     write_primitive!(serialize_f32(f32));
     write_primitive!(serialize_f64(f64));
@@ -440,9 +443,8 @@ impl<'w, 'k, W: Write> Struct<'w, 'k, W> {
             indent: self.ser.ser.indent.borrow(),
             // If previous field does not require indent, do not write it
             write_indent: self.write_indent,
-            text_format: self.ser.ser.text_format,
             allow_primitive: true,
-            empty_element_handling: self.ser.ser.empty_element_handling,
+            expand_empty_elements: self.ser.ser.expand_empty_elements,
         };
 
         if key == TEXT_KEY {
@@ -479,18 +481,12 @@ impl<'w, 'k, W: Write> SerializeStruct for Struct<'w, 'k, W> {
         self.ser.ser.indent.decrease();
 
         if self.children.is_empty() {
-            match self.ser.ser.empty_element_handling {
-                EmptyElementHandling::SelfClosed => {
-                    self.ser.ser.writer.write_str("/>")?;
-                }
-                EmptyElementHandling::SelfClosedWithSpace => {
-                    self.ser.ser.writer.write_str(" />")?;
-                }
-                EmptyElementHandling::Expanded => {
-                    self.ser.ser.writer.write_str("></")?;
-                    self.ser.ser.writer.write_str(self.ser.key.0)?;
-                    self.ser.ser.writer.write_char('>')?;
-                }
+            if self.ser.ser.expand_empty_elements {
+                self.ser.ser.writer.write_str("></")?;
+                self.ser.ser.writer.write_str(self.ser.key.0)?;
+                self.ser.ser.writer.write_char('>')?;
+            } else {
+                self.ser.ser.writer.write_str("/>")?;
             }
         } else {
             self.ser.ser.writer.write_char('>')?;
@@ -554,7 +550,7 @@ impl<'w, 'k, W: Write> SerializeMap for Map<'w, 'k, W> {
     where
         T: ?Sized + Serialize,
     {
-        if self.key.take().is_some() {
+        if let Some(_) = self.key.take() {
             return Err(SeError::Custom(
                 "calling `serialize_key` twice without `serialize_value`".to_string(),
             ));
@@ -600,7 +596,7 @@ impl<'w, 'k, W: Write> SerializeMap for Map<'w, 'k, W> {
 mod tests {
     use super::*;
     use crate::se::content::tests::*;
-    use crate::se::{Indent, QuoteLevel, TextFormat};
+    use crate::se::{Indent, QuoteLevel};
     use crate::utils::Bytes;
     use serde::Serialize;
     use std::collections::BTreeMap;
@@ -639,9 +635,8 @@ mod tests {
                             level: QuoteLevel::Full,
                             indent: Indent::None,
                             write_indent: false,
-                            text_format: TextFormat::Text,
                             allow_primitive: true,
-                            empty_element_handling: EmptyElementHandling::SelfClosed,
+                            expand_empty_elements: false,
                         },
                         key: XmlName("root"),
                     };
@@ -666,9 +661,8 @@ mod tests {
                             level: QuoteLevel::Full,
                             indent: Indent::None,
                             write_indent: false,
-                            text_format: TextFormat::Text,
                             allow_primitive: true,
-                            empty_element_handling: EmptyElementHandling::SelfClosed,
+                            expand_empty_elements: false,
                         },
                         key: XmlName("root"),
                     };
@@ -695,16 +689,18 @@ mod tests {
         serialize_as!(i16_:   -4200i16             => "<root>-4200</root>");
         serialize_as!(i32_:   -42000000i32         => "<root>-42000000</root>");
         serialize_as!(i64_:   -42000000000000i64   => "<root>-42000000000000</root>");
-        serialize_as!(isize_: -42000000isize       => "<root>-42000000</root>");
+        serialize_as!(isize_: -42000000000000isize => "<root>-42000000000000</root>");
 
         serialize_as!(u8_:    42u8                => "<root>42</root>");
         serialize_as!(u16_:   4200u16             => "<root>4200</root>");
         serialize_as!(u32_:   42000000u32         => "<root>42000000</root>");
         serialize_as!(u64_:   42000000000000u64   => "<root>42000000000000</root>");
-        serialize_as!(usize_: 42000000usize       => "<root>42000000</root>");
+        serialize_as!(usize_: 42000000000000usize => "<root>42000000000000</root>");
 
-        serialize_as!(i128_: -420000000000000000000000000000i128 => "<root>-420000000000000000000000000000</root>");
-        serialize_as!(u128_:  420000000000000000000000000000u128 => "<root>420000000000000000000000000000</root>");
+        serde_if_integer128! {
+            serialize_as!(i128_: -420000000000000000000000000000i128 => "<root>-420000000000000000000000000000</root>");
+            serialize_as!(u128_:  420000000000000000000000000000u128 => "<root>420000000000000000000000000000</root>");
+        }
 
         serialize_as!(f32_: 4.2f32 => "<root>4.2</root>");
         serialize_as!(f64_: 4.2f64 => "<root>4.2</root>");
@@ -795,16 +791,18 @@ mod tests {
                 text!(i16_:   -4200i16             => "-4200");
                 text!(i32_:   -42000000i32         => "-42000000");
                 text!(i64_:   -42000000000000i64   => "-42000000000000");
-                text!(isize_: -42000000isize       => "-42000000");
+                text!(isize_: -42000000000000isize => "-42000000000000");
 
                 text!(u8_:    42u8                => "42");
                 text!(u16_:   4200u16             => "4200");
                 text!(u32_:   42000000u32         => "42000000");
                 text!(u64_:   42000000000000u64   => "42000000000000");
-                text!(usize_: 42000000usize       => "42000000");
+                text!(usize_: 42000000000000usize => "42000000000000");
 
-                text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 text!(f32_: 4.2f32 => "4.2");
                 text!(f64_: 4.2f64 => "4.2");
@@ -918,16 +916,18 @@ mod tests {
                 text!(i16_:   -4200i16             => "-4200");
                 text!(i32_:   -42000000i32         => "-42000000");
                 text!(i64_:   -42000000000000i64   => "-42000000000000");
-                text!(isize_: -42000000isize       => "-42000000");
+                text!(isize_: -42000000000000isize => "-42000000000000");
 
                 text!(u8_:    42u8                => "42");
                 text!(u16_:   4200u16             => "4200");
                 text!(u32_:   42000000u32         => "42000000");
                 text!(u64_:   42000000000000u64   => "42000000000000");
-                text!(usize_: 42000000usize       => "42000000");
+                text!(usize_: 42000000000000usize => "42000000000000");
 
-                text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 text!(f32_: 4.2f32 => "4.2");
                 text!(f64_: 4.2f64 => "4.2");
@@ -1045,16 +1045,18 @@ mod tests {
                 value!(i16_:   -4200i16             => "-4200");
                 value!(i32_:   -42000000i32         => "-42000000");
                 value!(i64_:   -42000000000000i64   => "-42000000000000");
-                value!(isize_: -42000000isize       => "-42000000");
+                value!(isize_: -42000000000000isize => "-42000000000000");
 
                 value!(u8_:    42u8                => "42");
                 value!(u16_:   4200u16             => "4200");
                 value!(u32_:   42000000u32         => "42000000");
                 value!(u64_:   42000000000000u64   => "42000000000000");
-                value!(usize_: 42000000usize       => "42000000");
+                value!(usize_: 42000000000000usize => "42000000000000");
 
-                value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 value!(f32_: 4.2f32 => "4.2");
                 value!(f64_: 4.2f64 => "4.2");
@@ -1105,18 +1107,14 @@ mod tests {
                     => "<Tuple>first</Tuple>\
                         <Tuple>42</Tuple>");
 
-                // We cannot wrap map in any container and should not
-                // flatten it, so it is impossible to serialize maps
+                // We cannot wrap map or struct in any container and should not
+                // flatten it, so it is impossible to serialize maps and structs
                 err!(map:
                     BTreeMap::from([("$value", BTreeMap::from([("_1", 2), ("_3", 4)]))])
                     => Unsupported("serialization of map types is not supported in `$value` field"));
-                value!(struct_:
-                    Struct { key: "answer", val: (42, 42) }
-                    => "<Struct>\
-                            <key>answer</key>\
-                            <val>42</val>\
-                            <val>42</val>\
-                        </Struct>");
+                err!(struct_:
+                    BTreeMap::from([("$value", Struct { key: "answer", val: (42, 42) })])
+                    => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
                 value!(enum_struct:
                     Enum::Struct { key: "answer", val: (42, 42) }
                     => "<Struct>\
@@ -1154,16 +1152,18 @@ mod tests {
                 value!(i16_:   -4200i16             => "-4200");
                 value!(i32_:   -42000000i32         => "-42000000");
                 value!(i64_:   -42000000000000i64   => "-42000000000000");
-                value!(isize_: -42000000isize       => "-42000000");
+                value!(isize_: -42000000000000isize => "-42000000000000");
 
                 value!(u8_:    42u8                => "42");
                 value!(u16_:   4200u16             => "4200");
                 value!(u32_:   42000000u32         => "42000000");
                 value!(u64_:   42000000000000u64   => "42000000000000");
-                value!(usize_: 42000000usize       => "42000000");
+                value!(usize_: 42000000000000usize => "42000000000000");
 
-                value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 value!(f32_: 4.2f32 => "4.2");
                 value!(f64_: 4.2f64 => "4.2");
@@ -1234,8 +1234,8 @@ mod tests {
                     => "<Tuple>first</Tuple>\
                         <Tuple>42</Tuple>");
 
-                // We cannot wrap map in any container and should not
-                // flatten it, so it is impossible to serialize maps
+                // We cannot wrap map or struct in any container and should not
+                // flatten it, so it is impossible to serialize maps and structs
                 err!(map:
                     Value {
                         before: "answer",
@@ -1243,13 +1243,13 @@ mod tests {
                         after: "answer",
                     }
                     => Unsupported("serialization of map types is not supported in `$value` field"));
-                value!(struct_:
-                    Struct { key: "answer", val: (42, 42) }
-                    => "<Struct>\
-                            <key>answer</key>\
-                            <val>42</val>\
-                            <val>42</val>\
-                        </Struct>");
+                err!(struct_:
+                    Value {
+                        before: "answer",
+                        content: Struct { key: "answer", val: (42, 42) },
+                        after: "answer",
+                    }
+                    => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
                 value!(enum_struct:
                     Enum::Struct { key: "answer", val: (42, 42) }
                     => "<Struct>\
@@ -1352,9 +1352,8 @@ mod tests {
                             level: QuoteLevel::Full,
                             indent: Indent::Owned(Indentation::new(b' ', 2)),
                             write_indent: false,
-                            text_format: TextFormat::Text,
                             allow_primitive: true,
-                            empty_element_handling: EmptyElementHandling::SelfClosed,
+                            expand_empty_elements: false,
                         },
                         key: XmlName("root"),
                     };
@@ -1379,9 +1378,8 @@ mod tests {
                             level: QuoteLevel::Full,
                             indent: Indent::Owned(Indentation::new(b' ', 2)),
                             write_indent: false,
-                            text_format: TextFormat::Text,
                             allow_primitive: true,
-                            empty_element_handling: EmptyElementHandling::SelfClosed,
+                            expand_empty_elements: false,
                         },
                         key: XmlName("root"),
                     };
@@ -1408,16 +1406,18 @@ mod tests {
         serialize_as!(i16_:   -4200i16             => "<root>-4200</root>");
         serialize_as!(i32_:   -42000000i32         => "<root>-42000000</root>");
         serialize_as!(i64_:   -42000000000000i64   => "<root>-42000000000000</root>");
-        serialize_as!(isize_: -42000000isize       => "<root>-42000000</root>");
+        serialize_as!(isize_: -42000000000000isize => "<root>-42000000000000</root>");
 
         serialize_as!(u8_:    42u8                => "<root>42</root>");
         serialize_as!(u16_:   4200u16             => "<root>4200</root>");
         serialize_as!(u32_:   42000000u32         => "<root>42000000</root>");
         serialize_as!(u64_:   42000000000000u64   => "<root>42000000000000</root>");
-        serialize_as!(usize_: 42000000usize       => "<root>42000000</root>");
+        serialize_as!(usize_: 42000000000000usize => "<root>42000000000000</root>");
 
-        serialize_as!(i128_: -420000000000000000000000000000i128 => "<root>-420000000000000000000000000000</root>");
-        serialize_as!(u128_:  420000000000000000000000000000u128 => "<root>420000000000000000000000000000</root>");
+        serde_if_integer128! {
+            serialize_as!(i128_: -420000000000000000000000000000i128 => "<root>-420000000000000000000000000000</root>");
+            serialize_as!(u128_:  420000000000000000000000000000u128 => "<root>420000000000000000000000000000</root>");
+        }
 
         serialize_as!(f32_: 4.2f32 => "<root>4.2</root>");
         serialize_as!(f64_: 4.2f64 => "<root>4.2</root>");
@@ -1511,16 +1511,18 @@ mod tests {
                 text!(i16_:   -4200i16             => "-4200");
                 text!(i32_:   -42000000i32         => "-42000000");
                 text!(i64_:   -42000000000000i64   => "-42000000000000");
-                text!(isize_: -42000000isize       => "-42000000");
+                text!(isize_: -42000000000000isize => "-42000000000000");
 
                 text!(u8_:    42u8                => "42");
                 text!(u16_:   4200u16             => "4200");
                 text!(u32_:   42000000u32         => "42000000");
                 text!(u64_:   42000000000000u64   => "42000000000000");
-                text!(usize_: 42000000usize       => "42000000");
+                text!(usize_: 42000000000000usize => "42000000000000");
 
-                text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 text!(f32_: 4.2f32 => "4.2");
                 text!(f64_: 4.2f64 => "4.2");
@@ -1635,16 +1637,18 @@ mod tests {
                 text!(i16_:   -4200i16             => "-4200");
                 text!(i32_:   -42000000i32         => "-42000000");
                 text!(i64_:   -42000000000000i64   => "-42000000000000");
-                text!(isize_: -42000000isize       => "-42000000");
+                text!(isize_: -42000000000000isize => "-42000000000000");
 
                 text!(u8_:    42u8                => "42");
                 text!(u16_:   4200u16             => "4200");
                 text!(u32_:   42000000u32         => "42000000");
                 text!(u64_:   42000000000000u64   => "42000000000000");
-                text!(usize_: 42000000usize       => "42000000");
+                text!(usize_: 42000000000000usize => "42000000000000");
 
-                text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 text!(f32_: 4.2f32 => "4.2");
                 text!(f64_: 4.2f64 => "4.2");
@@ -1764,16 +1768,18 @@ mod tests {
                 value!(i16_:   -4200i16             => "-4200");
                 value!(i32_:   -42000000i32         => "-42000000");
                 value!(i64_:   -42000000000000i64   => "-42000000000000");
-                value!(isize_: -42000000isize       => "-42000000");
+                value!(isize_: -42000000000000isize => "-42000000000000");
 
                 value!(u8_:    42u8                => "42");
                 value!(u16_:   4200u16             => "4200");
                 value!(u32_:   42000000u32         => "42000000");
                 value!(u64_:   42000000000000u64   => "42000000000000");
-                value!(usize_: 42000000usize       => "42000000");
+                value!(usize_: 42000000000000usize => "42000000000000");
 
-                value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 value!(f32_: 4.2f32 => "4.2");
                 value!(f64_: 4.2f64 => "4.2");
@@ -1824,19 +1830,14 @@ mod tests {
                         <Tuple>first</Tuple>\n  \
                         <Tuple>42</Tuple>\n");
 
-                // We cannot wrap map in any container and should not
-                // flatten it, so it is impossible to serialize maps
+                // We cannot wrap map or struct in any container and should not
+                // flatten it, so it is impossible to serialize maps and structs
                 err!(map:
                     BTreeMap::from([("$value", BTreeMap::from([("_1", 2), ("_3", 4)]))])
                     => Unsupported("serialization of map types is not supported in `$value` field"));
-                value!(struct_:
-                    Struct { key: "answer", val: (42, 42) }
-                    => "\n  \
-                        <Struct>\n    \
-                            <key>answer</key>\n    \
-                            <val>42</val>\n    \
-                            <val>42</val>\n  \
-                        </Struct>\n");
+                err!(struct_:
+                    BTreeMap::from([("$value", Struct { key: "answer", val: (42, 42) })])
+                    => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
                 value!(enum_struct:
                     Enum::Struct { key: "answer", val: (42, 42) }
                     => "\n  \
@@ -1876,16 +1877,18 @@ mod tests {
                 value!(i16_:   -4200i16             => "-4200");
                 value!(i32_:   -42000000i32         => "-42000000");
                 value!(i64_:   -42000000000000i64   => "-42000000000000");
-                value!(isize_: -42000000isize       => "-42000000");
+                value!(isize_: -42000000000000isize => "-42000000000000");
 
                 value!(u8_:    42u8                => "42");
                 value!(u16_:   4200u16             => "4200");
                 value!(u32_:   42000000u32         => "42000000");
                 value!(u64_:   42000000000000u64   => "42000000000000");
-                value!(usize_: 42000000usize       => "42000000");
+                value!(usize_: 42000000000000usize => "42000000000000");
 
-                value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-                value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                serde_if_integer128! {
+                    value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                    value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+                }
 
                 value!(f32_: 4.2f32 => "4.2");
                 value!(f64_: 4.2f64 => "4.2");
@@ -1956,8 +1959,8 @@ mod tests {
                         <Tuple>first</Tuple>\n  \
                         <Tuple>42</Tuple>\n  ");
 
-                // We cannot wrap map in any container and should not
-                // flatten it, so it is impossible to serialize maps
+                // We cannot wrap map or struct in any container and should not
+                // flatten it, so it is impossible to serialize maps and structs
                 err!(map:
                     Value {
                         before: "answer",
@@ -1965,22 +1968,13 @@ mod tests {
                         after: "answer",
                     }
                     => Unsupported("serialization of map types is not supported in `$value` field"));
-                value!(struct_:
+                err!(struct_:
                     Value {
                         before: "answer",
                         content: Struct { key: "answer", val: (42, 42) },
                         after: "answer",
                     }
-                    => "\n  \
-                        <Value>\n    \
-                            <before>answer</before>\n    \
-                            <Struct>\n      \
-                                <key>answer</key>\n      \
-                                <val>42</val>\n      \
-                                <val>42</val>\n    \
-                            </Struct>\n    \
-                            <after>answer</after>\n  \
-                        </Value>\n  ");
+                    => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
                 value!(enum_struct:
                     Enum::Struct { key: "answer", val: (42, 42) }
                     => "\n  \
@@ -2087,9 +2081,8 @@ mod tests {
                             level: QuoteLevel::Full,
                             indent: Indent::None,
                             write_indent: false,
-                            text_format: TextFormat::Text,
                             allow_primitive: true,
-                            empty_element_handling: EmptyElementHandling::Expanded,
+                            expand_empty_elements: true,
                         },
                         key: XmlName("root"),
                     };

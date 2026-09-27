@@ -177,17 +177,15 @@ impl Extent3d {
     #[must_use]
     pub fn mip_level_size(&self, level: u32, dim: TextureDimension) -> Self {
         Self {
-            width: u32::max(1, self.width.unbounded_shr(level)),
+            width: u32::max(1, self.width >> level),
             height: match dim {
                 TextureDimension::D1 => 1,
-                _ => u32::max(1, self.height.unbounded_shr(level)),
+                _ => u32::max(1, self.height >> level),
             },
             depth_or_array_layers: match dim {
                 TextureDimension::D1 => 1,
                 TextureDimension::D2 => self.depth_or_array_layers,
-                TextureDimension::D3 => {
-                    u32::max(1, self.depth_or_array_layers.unbounded_shr(level))
-                }
+                TextureDimension::D3 => u32::max(1, self.depth_or_array_layers >> level),
             },
         }
     }

@@ -5,12 +5,14 @@
 
 use std::ops::Range;
 
-use crate::error::Result;
-use crate::image::{DataTypeTag, ImageDataType};
-use crate::render::MAX_BORDER;
-use crate::util::{
-    CACHE_LINE_BYTE_SIZE, CacheLine, SmallVec, SmallVecHeapStorage, num_per_cache_line,
-    slice_from_cachelines, slice_from_cachelines_mut,
+use crate::{
+    error::Result,
+    image::{DataTypeTag, ImageDataType},
+    render::MAX_BORDER,
+    util::{
+        CACHE_LINE_BYTE_SIZE, CacheLine, SmallVec, num_per_cache_line, slice_from_cachelines,
+        slice_from_cachelines_mut,
+    },
 };
 
 /// Temporary storage for data rows. Note that the first pixel of the group is expected to be
@@ -81,12 +83,11 @@ impl RowBuffer {
         slice_from_cachelines_mut(&mut self.buffer[start..start + stride])
     }
 
-    pub fn get_rows_mut<'a, T: ImageDataType, HeapStorage: SmallVecHeapStorage<&'a mut [T]>>(
-        &'a mut self,
+    pub fn get_rows_mut<T: ImageDataType>(
+        &mut self,
         y: Range<usize>,
         xoffset: usize,
-        out: &mut SmallVec<&'a mut [T], 8, HeapStorage>,
-    ) {
+    ) -> SmallVec<&mut [T], 8> {
         assert!(y.clone().count() <= self.num_rows);
         let first_row_idx = y.start & (self.num_rows - 1);
         let stride = self.row_stride;
@@ -95,18 +96,12 @@ impl RowBuffer {
         let num_post = y.clone().count() - num_pre;
         let buf = &mut self.buffer[..];
         let (pre, post) = buf.split_at_mut(start);
-        // Note: doing two `extend`s seems to be slightly, but noticeably, faster than chaining
-        // the iterators and doing a single extend.
-        out.extend(
-            post.chunks_exact_mut(stride)
-                .take(num_post)
-                .map(|chunk| &mut slice_from_cachelines_mut(chunk)[xoffset..]),
-        );
-        out.extend(
-            pre.chunks_exact_mut(stride)
-                .take(num_pre)
-                .map(|chunk| &mut slice_from_cachelines_mut(chunk)[xoffset..]),
-        );
+        let pre_rows = pre.chunks_exact_mut(stride).take(num_pre);
+        let post_rows = post.chunks_exact_mut(stride).take(num_post);
+        post_rows
+            .chain(pre_rows)
+            .map(|x| &mut slice_from_cachelines_mut(x)[xoffset..])
+            .collect()
     }
 
     pub const fn x0_offset<T: ImageDataType>() -> usize {

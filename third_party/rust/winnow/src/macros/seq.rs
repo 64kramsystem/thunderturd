@@ -11,7 +11,6 @@
 ///# Example
 ///
 /// ```
-/// # #[cfg(feature = "ascii")] {
 /// # use winnow::prelude::*;
 /// # use winnow::ascii::{alphanumeric1, dec_uint, space0};
 /// # use winnow::combinator::delimited;
@@ -63,7 +62,6 @@
 ///         },
 ///     )),
 /// );
-/// # }
 /// ```
 #[macro_export]
 #[doc(alias = "tuple")]

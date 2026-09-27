@@ -4,12 +4,13 @@
 
 use super::*;
 
-pub fn fields_kind(fields: &[initial::Field]) -> FieldsKind {
-    if fields.is_empty() {
+pub fn pass(rec: &mut Record) -> Result<()> {
+    rec.fields_kind = if rec.fields.is_empty() {
         FieldsKind::Unit
-    } else if fields.iter().any(|f| f.name.is_empty()) {
+    } else if rec.fields.iter().any(|f| f.name.is_empty()) {
         FieldsKind::Unnamed
     } else {
         FieldsKind::Named
-    }
+    };
+    Ok(())
 }

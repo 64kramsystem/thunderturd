@@ -3,27 +3,25 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use crate::features::patches::PatchesDictionary;
-use crate::frame::ReferenceFrame;
-use crate::headers::extra_channels::ExtraChannelInfo;
-use crate::render::{ErasedLocalState, RenderPipelineInPlaceStage};
-use crate::util::NewWithCapacity as _;
-use crate::util::sync::{Arc, RwLock};
+use std::{any::Any, sync::Arc};
+
+use crate::{
+    features::patches::PatchesDictionary,
+    frame::ReferenceFrame,
+    headers::extra_channels::ExtraChannelInfo,
+    render::RenderPipelineInPlaceStage,
+    util::{AtomicRefCell, NewWithCapacity as _},
+};
 
 pub struct PatchesStage {
-    patches: Arc<RwLock<PatchesDictionary>>,
+    patches: Arc<AtomicRefCell<PatchesDictionary>>,
     extra_channels: Vec<ExtraChannelInfo>,
     decoder_state: Arc<[Option<ReferenceFrame>; 4]>,
 }
 
-struct PatchesState {
-    patches_for_row_result: Vec<usize>,
-    blending_scratch: Vec<f32>,
-}
-
 impl PatchesStage {
     pub fn new(
-        patches: Arc<RwLock<PatchesDictionary>>,
+        patches: Arc<AtomicRefCell<PatchesDictionary>>,
         extra_channels: Vec<ExtraChannelInfo>,
         decoder_state: Arc<[Option<ReferenceFrame>; 4]>,
     ) -> Self {
@@ -53,18 +51,15 @@ impl RenderPipelineInPlaceStage for PatchesStage {
         position: (usize, usize),
         xsize: usize,
         row: &mut [&mut [f32]],
-        state: Option<&mut ErasedLocalState>,
-        _previous_call_was_previous_row: bool,
+        state: Option<&mut dyn Any>,
     ) {
-        let patches = self.patches.try_read().unwrap();
+        let patches = self.patches.borrow();
         if patches.positions.is_empty() {
             return;
         }
-        let state: &mut PatchesState = state.unwrap().downcast_mut().unwrap();
-        if state.patches_for_row_result.capacity() < patches.positions.len() {
-            state
-                .patches_for_row_result
-                .reserve(patches.positions.len() - state.patches_for_row_result.len());
+        let state: &mut Vec<usize> = state.unwrap().downcast_mut().unwrap();
+        if state.capacity() < patches.positions.len() {
+            state.reserve(patches.positions.len() - state.len());
         }
         patches.add_one_row(
             row,
@@ -72,32 +67,29 @@ impl RenderPipelineInPlaceStage for PatchesStage {
             xsize,
             &self.extra_channels,
             &self.decoder_state[..],
-            &mut state.patches_for_row_result,
-            &mut state.blending_scratch,
+            state,
         );
     }
 
-    fn init_local_state(&self) -> crate::error::Result<Option<Box<ErasedLocalState>>> {
+    fn init_local_state(&self, _thread_index: usize) -> crate::error::Result<Option<Box<dyn Any>>> {
         // TODO(veluca): I think this is wrong, check that.
-        let patches = self.patches.try_read().unwrap();
+        let patches = self.patches.borrow();
         let len = patches.positions.len();
         let patches_for_row_result = Vec::<usize>::new_with_capacity(len)?;
-        Ok(Some(Box::new(PatchesState {
-            patches_for_row_result,
-            blending_scratch: Vec::new(),
-        }) as Box<ErasedLocalState>))
+        Ok(Some(Box::new(patches_for_row_result) as Box<dyn Any>))
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use rand::SeedableRng;
     use test_log::test;
 
     use super::*;
     use crate::error::Result;
-    use crate::tests::decode::read_headers_and_toc;
-    use crate::util::sync::Arc;
+    use crate::util::test::read_headers_and_toc;
 
     #[test]
     fn patches_consistency() -> Result<()> {
@@ -119,7 +111,7 @@ mod test {
         ]);
         crate::render::test::test_stage_consistency(
             || PatchesStage {
-                patches: Arc::new(RwLock::new(patch_dict.clone())),
+                patches: Arc::new(AtomicRefCell::new(patch_dict.clone())),
                 extra_channels: file_header.image_metadata.extra_channel_info.clone(),
                 decoder_state: reference_frames.clone(),
             },

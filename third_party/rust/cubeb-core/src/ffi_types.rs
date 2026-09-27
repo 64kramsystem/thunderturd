@@ -4,9 +4,7 @@
 // accompanying file LICENSE for details.
 
 use std::cell::UnsafeCell;
-use std::mem::MaybeUninit;
-
-pub type Opaque<T> = UnsafeCell<MaybeUninit<T>>;
+pub struct Opaque(UnsafeCell<()>);
 
 /// Generate a newtype wrapper `$owned` and reference wrapper
 /// `$borrowed` around a POD FFI type that lives on the heap.
@@ -103,8 +101,7 @@ macro_rules! ffi_type_heap {
         }
 
         $(#[$borrowed_attr])*
-        #[repr(transparent)]
-        pub struct $borrowed($crate::ffi_types::Opaque<$ctype>);
+        pub struct $borrowed($crate::ffi_types::Opaque);
 
         impl $borrowed {
             /// # Safety
@@ -127,13 +124,13 @@ macro_rules! ffi_type_heap {
 
             #[inline]
             pub fn as_ptr(&self) -> *mut $ctype {
-                self.0.get().cast()
+                self as *const _ as *mut _
             }
         }
 
         impl ::std::fmt::Debug for $borrowed {
             fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                let ptr = self.0.get() as usize;
+                let ptr = self as *const $borrowed as usize;
                 f.debug_tuple(stringify!($borrowed))
                     .field(&ptr)
                     .finish()
@@ -212,8 +209,7 @@ macro_rules! ffi_type_stack {
         }
 
         $(#[$borrowed_attr])*
-        #[repr(transparent)]
-        pub struct $borrowed($crate::ffi_types::Opaque<$ctype>);
+        pub struct $borrowed($crate::ffi_types::Opaque);
 
         impl $borrowed {
             /// # Safety
@@ -236,13 +232,13 @@ macro_rules! ffi_type_stack {
 
             #[inline]
             pub fn as_ptr(&self) -> *mut $ctype {
-                self.0.get().cast()
+                self as *const _ as *mut _
             }
         }
 
         impl ::std::fmt::Debug for $borrowed {
             fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                let ptr = self.0.get() as usize;
+                let ptr = self as *const $borrowed as usize;
                 f.debug_tuple(stringify!($borrowed))
                     .field(&ptr)
                     .finish()

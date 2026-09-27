@@ -127,10 +127,8 @@ enum Version {
     Nightly,
 }
 
-/// The reason why a given rust target is not supported.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum InvalidRustTarget {
-    /// The rust target is not supported by bindgen (is too old).
     TooEarly,
 }
 
@@ -189,7 +187,6 @@ macro_rules! define_rust_editions {
     }
 }
 
-/// This error is returned when a rust edition is unknown.
 #[derive(Debug)]
 pub struct InvalidRustEdition(String);
 
@@ -419,25 +416,8 @@ impl FromStr for RustTarget {
             return Ok(Self::Nightly);
         }
 
-        let (version, pre_release) =
-            if let Some((version, pre_release)) = input.split_once('-') {
-                (version, pre_release)
-            } else {
-                (input, "")
-            };
-
-        const MSG: &str = r#"accepted values are of the form "1.71", "1.71.1" , "1.71.1-beta", "1.71.1-beta.1", "1.71.1-nightly" or "nightly"."#;
-
-        if !(pre_release.is_empty() /* stable */
-            || pre_release == "beta"
-            || pre_release.starts_with("beta.")
-            || pre_release == "nightly")
-        {
-            return Err(invalid_input(input, MSG));
-        }
-
-        let Some((major_str, tail)) = version.split_once('.') else {
-            return Err(invalid_input(input, MSG));
+        let Some((major_str, tail)) = input.split_once('.') else {
+            return Err(invalid_input(input, "accepted values are of the form \"1.71\", \"1.71.1\" or \"nightly\"." ) );
         };
 
         if major_str != "1" {
@@ -447,7 +427,7 @@ impl FromStr for RustTarget {
             ));
         }
 
-        let (mut minor, mut patch) = if let Some((minor_str, patch_str)) =
+        let (minor, patch) = if let Some((minor_str, patch_str)) =
             tail.split_once('.')
         {
             let Ok(minor) = minor_str.parse::<u64>() else {
@@ -463,12 +443,6 @@ impl FromStr for RustTarget {
             };
             (minor, 0)
         };
-
-        if pre_release == "nightly" {
-            // treat nightly as incomplete and therefore as the previous maximaly patched stable
-            minor -= 1;
-            patch = u64::MAX;
-        }
 
         Self::stable(minor, patch).map_err(|err| invalid_input(input, err))
     }
@@ -545,9 +519,7 @@ mod test {
         // Two targets are equivalent if they enable the same set of features
         let expected = RustFeatures::new_with_latest_edition(expected);
         let found = RustFeatures::new_with_latest_edition(
-            input.parse::<RustTarget>().unwrap_or_else(|_| {
-                panic!("{input} should parse as a valid target")
-            }),
+            input.parse::<RustTarget>().unwrap(),
         );
         assert_eq!(
             expected,
@@ -570,9 +542,6 @@ mod test {
         test_target("1.71.1", RustTarget::Stable_1_71);
         test_target("1.72", RustTarget::Stable_1_71);
         test_target("1.73", RustTarget::Stable_1_73);
-        test_target("1.82.0-beta", RustTarget::Stable_1_82);
-        test_target("1.82.0-beta.1", RustTarget::Stable_1_82);
-        test_target("1.83.1-nightly", RustTarget::Stable_1_82);
         test_target("1.18446744073709551615", LATEST_STABLE_RUST);
         test_target("nightly", RustTarget::Nightly);
     }

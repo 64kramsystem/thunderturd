@@ -1,7 +1,6 @@
 use {
     super::{Pid, ProcessInspector, ThreadInfoError, regs::*},
     crate::minidump_cpu::{FP_REG_COUNT, GP_REG_COUNT, RawContextCPU},
-    error_graph::WriteErrorList,
 };
 
 #[derive(Debug)]
@@ -9,8 +8,8 @@ pub struct ThreadInfoAarch64 {
     pub stack_pointer: usize,
     pub tgid: Pid, // thread group id
     pub ppid: Pid, // parent process
-    pub regs: GenRegs,
-    pub fpregs: Option<FpRegs>,
+    pub regs: libc::user_regs_struct,
+    pub fpregs: user_fpsimd_struct,
 }
 
 impl ThreadInfoAarch64 {
@@ -30,33 +29,19 @@ impl ThreadInfoAarch64 {
         // field instead
         out.pc = self.regs.pc;
 
-        let fpregs = self.fpregs.unwrap_or_default();
-        out.fpsr = fpregs.fpsr;
-        out.fpcr = fpregs.fpcr;
-        out.float_regs[..FP_REG_COUNT].copy_from_slice(&fpregs.vregs[..FP_REG_COUNT]);
+        out.fpsr = self.fpregs.fpsr;
+        out.fpcr = self.fpregs.fpcr;
+        out.float_regs[..FP_REG_COUNT].copy_from_slice(&self.fpregs.vregs[..FP_REG_COUNT]);
     }
 
-    pub fn create(
-        process_inspector: &dyn ProcessInspector,
-        tid: Pid,
-        mut soft_errors: impl WriteErrorList<ThreadInfoError>,
-    ) -> Result<Self, ThreadInfoError> {
+    pub fn create(process_inspector: &ProcessInspector, tid: Pid) -> Result<Self, ThreadInfoError> {
         let (ppid, tgid) = super::get_ppid_and_tgid(process_inspector, tid)?;
-
         let regs = process_inspector
             .get_gen_regs(tid)
-            .map_err(ThreadInfoError::GetGenRegsFailed)?;
-
-        let fpregs = match process_inspector
+            .map_err(ThreadInfoError::PtraceError)?;
+        let fpregs = process_inspector
             .get_fp_regs(tid)
-            .map_err(ThreadInfoError::GetFpRegsFailed)
-        {
-            Ok(regs) => Some(regs),
-            Err(e) => {
-                soft_errors.push(e);
-                None
-            }
-        };
+            .map_err(ThreadInfoError::PtraceError)?;
 
         let stack_pointer = regs.sp as usize;
 

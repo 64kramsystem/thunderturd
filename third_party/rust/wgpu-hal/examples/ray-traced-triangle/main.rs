@@ -294,12 +294,11 @@ impl<A: hal::Api> Example<A> {
         dbg!(&surface_caps.formats);
         let surface_format = if surface_caps
             .formats
-            .iter()
-            .any(|fc| fc.format == wgpu_types::TextureFormat::Rgba8Unorm)
+            .contains(&wgpu_types::TextureFormat::Rgba8Unorm)
         {
             wgpu_types::TextureFormat::Rgba8Unorm
         } else {
-            surface_caps.formats.first().unwrap().format
+            *surface_caps.formats.first().unwrap()
         };
         let surface_config = hal::SurfaceConfiguration {
             maximum_frame_latency: DESIRED_MAX_LATENCY
@@ -308,7 +307,6 @@ impl<A: hal::Api> Example<A> {
             present_mode: wgpu_types::PresentMode::Fifo,
             composite_alpha_mode: wgpu_types::CompositeAlphaMode::Opaque,
             format: surface_format,
-            color_space: wgpu_types::SurfaceColorSpace::Srgb,
             extent: wgpu_types::Extent3d {
                 width: window_size.0,
                 height: window_size.1,
@@ -676,7 +674,6 @@ impl<A: hal::Api> Example<A> {
             dimension: wgpu_types::TextureViewDimension::D2,
             usage: wgpu_types::TextureUses::STORAGE_READ_WRITE | wgpu_types::TextureUses::COPY_SRC,
             range: wgpu_types::ImageSubresourceRange::default(),
-            swizzle: wgpu_types::TextureComponentSwizzle::default(),
         };
         let texture_view = unsafe { device.create_texture_view(&texture, &view_desc).unwrap() };
 
@@ -814,7 +811,6 @@ impl<A: hal::Api> Example<A> {
                     from: wgpu_types::TextureUses::UNINITIALIZED,
                     to: wgpu_types::TextureUses::STORAGE_READ_WRITE,
                 },
-                queue_family_ownership_transfer: None,
             };
 
             cmd_encoder.transition_textures(iter::once(texture_barrier));
@@ -888,7 +884,6 @@ impl<A: hal::Api> Example<A> {
                 from: wgpu_types::TextureUses::UNINITIALIZED,
                 to: wgpu_types::TextureUses::COPY_DST,
             },
-            queue_family_ownership_transfer: None,
         };
 
         let instances_buffer_size =
@@ -972,7 +967,6 @@ impl<A: hal::Api> Example<A> {
             dimension: wgpu_types::TextureViewDimension::D2,
             usage: wgpu_types::TextureUses::COPY_DST,
             range: wgpu_types::ImageSubresourceRange::default(),
-            swizzle: wgpu_types::TextureComponentSwizzle::default(),
         };
         let surface_tex_view = unsafe {
             self.device
@@ -999,7 +993,6 @@ impl<A: hal::Api> Example<A> {
                 from: wgpu_types::TextureUses::COPY_DST,
                 to: wgpu_types::TextureUses::PRESENT,
             },
-            queue_family_ownership_transfer: None,
         };
         let target_barrier2 = hal::TextureBarrier {
             texture: &self.texture,
@@ -1008,7 +1001,6 @@ impl<A: hal::Api> Example<A> {
                 from: wgpu_types::TextureUses::STORAGE_READ_WRITE,
                 to: wgpu_types::TextureUses::COPY_SRC,
             },
-            queue_family_ownership_transfer: None,
         };
         let target_barrier3 = hal::TextureBarrier {
             texture: &self.texture,
@@ -1017,7 +1009,6 @@ impl<A: hal::Api> Example<A> {
                 from: wgpu_types::TextureUses::COPY_SRC,
                 to: wgpu_types::TextureUses::STORAGE_READ_WRITE,
             },
-            queue_family_ownership_transfer: None,
         };
         unsafe {
             ctx.encoder.end_compute_pass();

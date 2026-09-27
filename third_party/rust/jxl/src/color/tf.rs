@@ -3,9 +3,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use jxl_simd::{F32SimdVec, SimdDescriptor, SimdMask};
-
 use crate::util::{eval_rational_poly, eval_rational_poly_simd};
+use jxl_simd::{F32SimdVec, SimdDescriptor, SimdMask};
 
 /// Converts the linear samples with the sRGB transfer curve (SIMD version).
 // Max error ~5e-7
@@ -66,7 +65,7 @@ pub fn srgb_to_linear(samples: &mut [f32]) {
     for x in samples {
         let a = x.abs();
         *x = if a <= 0.04045 {
-            a * (1.0 / 12.92)
+            a / 12.92
         } else {
             eval_rational_poly(a, P, Q)
         }
@@ -100,7 +99,7 @@ pub fn srgb_to_linear_simd<D: SimdDescriptor>(d: D, samples: &mut [f32]) {
         D::F32Vec::splat(d, 0.04045)
             .gt(a)
             .if_then_else_f32(
-                a * D::F32Vec::splat(d, 1.0 / 12.92),
+                a / D::F32Vec::splat(d, 12.92),
                 eval_rational_poly_simd(d, a, P, Q),
             )
             .copysign(x)
@@ -525,7 +524,7 @@ mod test {
     use test_log::test;
 
     use super::*;
-    use crate::tests::assert_close;
+    use crate::util::test::assert_all_almost_abs_eq;
 
     fn arb_samples(
         u: &mut arbtest::arbitrary::Unstructured,
@@ -579,7 +578,7 @@ mod test {
 
             linear_to_srgb_simd(jxl_simd::ScalarDescriptor::new().unwrap(), &mut output);
             srgb_to_linear(&mut output);
-            assert_close!(all, &output, &samples, 2e-6);
+            assert_all_almost_abs_eq(&output, &samples, 2e-6);
             Ok(())
         });
     }
@@ -592,7 +591,7 @@ mod test {
 
             linear_to_bt709_simd(jxl_simd::ScalarDescriptor::new().unwrap(), &mut output);
             bt709_to_linear(&mut output);
-            assert_close!(all, &output, &samples, 5e-6);
+            assert_all_almost_abs_eq(&output, &samples, 5e-6);
             Ok(())
         });
     }
@@ -605,7 +604,7 @@ mod test {
 
             linear_to_srgb_naive(&mut samples);
             linear_to_srgb_simd(jxl_simd::ScalarDescriptor::new().unwrap(), &mut simd);
-            assert_close!(all, &samples, &simd, 1e-6);
+            assert_all_almost_abs_eq(&samples, &simd, 1e-6);
             Ok(())
         });
     }
@@ -618,7 +617,7 @@ mod test {
 
             linear_to_bt709_naive(&mut samples);
             linear_to_bt709_simd(jxl_simd::ScalarDescriptor::new().unwrap(), &mut simd);
-            assert_close!(all, &samples, &simd, 1e-6);
+            assert_all_almost_abs_eq(&samples, &simd, 1e-6);
             Ok(())
         });
     }
@@ -633,7 +632,7 @@ mod test {
             linear_to_pq(intensity_target, &mut samples);
             linear_to_pq_precise(intensity_target, &mut precise);
             // Error seems to increase at intensity_target < 10000
-            assert_close!(all, &samples, &precise, 8e-7);
+            assert_all_almost_abs_eq(&samples, &precise, 8e-7);
             Ok(())
         });
     }
@@ -647,7 +646,7 @@ mod test {
 
             pq_to_linear(intensity_target, &mut samples);
             pq_to_linear_precise(intensity_target, &mut precise);
-            assert_close!(all, &samples, &precise, 3e-6);
+            assert_all_almost_abs_eq(&samples, &precise, 3e-6);
             Ok(())
         });
     }
@@ -661,7 +660,7 @@ mod test {
 
             bt709_to_linear(&mut samples);
             bt709_to_linear_simd(jxl_simd::ScalarDescriptor::new().unwrap(), xsize, &mut simd);
-            assert_close!(all, &samples, &simd, 1e-5);
+            assert_all_almost_abs_eq(&samples, &simd, 1e-5);
             Ok(())
         });
     }
@@ -681,7 +680,7 @@ mod test {
                 xsize,
                 &mut simd,
             );
-            assert_close!(all, &samples, &simd, 2e-5);
+            assert_all_almost_abs_eq(&samples, &simd, 2e-5);
             Ok(())
         });
     }
@@ -701,7 +700,7 @@ mod test {
                 xsize,
                 &mut simd,
             );
-            assert_close!(all, &samples, &simd, 2e-5);
+            assert_all_almost_abs_eq(&samples, &simd, 2e-5);
             Ok(())
         });
     }
@@ -740,8 +739,7 @@ mod test {
             ];
             hlg_display_to_scene(intensity_target, luminance_rgb, precise);
 
-            assert_close!(
-                all,
+            assert_all_almost_abs_eq(
                 &[fast_r, fast_g, fast_b],
                 &[precise_r, precise_g, precise_b],
                 7.2e-7,
@@ -767,8 +765,7 @@ mod test {
             ];
             hlg_scene_to_display(intensity_target, luminance_rgb, precise);
 
-            assert_close!(
-                all,
+            assert_all_almost_abs_eq(
                 &[fast_r, fast_g, fast_b],
                 &[precise_r, precise_g, precise_b],
                 7.2e-7,
@@ -786,7 +783,7 @@ mod test {
 
             scene_to_hlg(&mut samples);
             scene_to_hlg_precise(&mut precise);
-            assert_close!(all, &samples, &precise, 5e-7);
+            assert_all_almost_abs_eq(&samples, &precise, 5e-7);
             Ok(())
         });
     }
@@ -799,7 +796,7 @@ mod test {
 
             hlg_to_scene(&mut samples);
             hlg_to_scene_precise(&mut precise);
-            assert_close!(all, &samples, &precise, 5e-6);
+            assert_all_almost_abs_eq(&samples, &precise, 5e-6);
             Ok(())
         });
     }

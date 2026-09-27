@@ -5,16 +5,15 @@
 
 use std::any::Any;
 use std::fmt::Display;
-use std::sync::Arc;
+
+use crate::error::Result;
+use crate::image::{DataTypeTag, ImageDataType};
+use crate::render::StageSpecialCase;
+use crate::util::ShiftRightCeil;
 
 use super::save::SaveStage;
 use super::stages::ExtendToImageDimensionsStage;
 use super::{RenderPipelineInOutStage, RenderPipelineInPlaceStage};
-use crate::error::Result;
-use crate::image::{BufferRecycler, DataTypeTag, ImageDataType};
-use crate::render::{ErasedLocalState, StageSpecialCase};
-use crate::util::ShiftRightCeil;
-use crate::util::sync::atomic::AtomicBool;
 
 pub enum Stage<Buffer> {
     InPlace(Box<dyn RunInPlaceStage<Buffer>>),
@@ -24,10 +23,10 @@ pub enum Stage<Buffer> {
 }
 
 impl<Buffer: 'static> Stage<Buffer> {
-    pub(super) fn init_local_state(&self) -> Result<Option<Box<ErasedLocalState>>> {
+    pub(super) fn init_local_state(&self, thread_index: usize) -> Result<Option<Box<dyn Any>>> {
         match self {
-            Stage::InPlace(s) => s.init_local_state(),
-            Stage::InOut(s) => s.init_local_state(),
+            Stage::InPlace(s) => s.init_local_state(thread_index),
+            Stage::InOut(s) => s.init_local_state(thread_index),
             _ => Ok(None),
         }
     }
@@ -107,12 +106,11 @@ pub struct RenderPipelineShared<Buffer> {
     pub input_size: (usize, usize),
     pub log_group_size: usize,
     pub group_count: (usize, usize),
-    pub group_chan_complete: Vec<Vec<AtomicBool>>,
+    pub group_chan_complete: Vec<Vec<bool>>,
     pub chunk_size: usize,
     pub stages: Vec<Stage<Buffer>>,
     pub extend_stage_index: Option<usize>,
     pub channel_is_used: Vec<bool>,
-    pub buffer_recycler: Arc<BufferRecycler>,
 }
 
 impl<Buffer> RenderPipelineShared<Buffer> {
@@ -148,15 +146,10 @@ impl<Buffer> RenderPipelineShared<Buffer> {
         requested_data_type: DataTypeTag,
     ) -> (usize, usize) {
         let ChannelInfo { downsample, ty } = self.channel_info[0][channel];
-        // Channels that no stage consumes have no type at all. Callers may still ask for a
-        // scratch buffer for them (e.g. VarDCT always decodes three colour channels, but a
-        // grayscale pipeline only ever reads the first one); the data written there is
-        // discarded, so any type is acceptable.
-        if let Some(ty) = ty
-            && ty != requested_data_type
-        {
+        if ty.unwrap() != requested_data_type {
             panic!(
-                "Invalid pipeline usage: incorrect channel type, requested {requested_data_type:?}, but pipeline wants {ty:?}"
+                "Invalid pipeline usage: incorrect channel type, requested {:?}, but pipeline wants {ty:?}",
+                requested_data_type
             );
         }
         // 420 JPEGs are padded to 16 pixels, not to 8.
@@ -186,8 +179,8 @@ pub trait PipelineBuffer {
     type InOutExtraInfo;
 }
 
-pub trait InPlaceStage: Any + Display + Send + Sync {
-    fn init_local_state(&self) -> Result<Option<Box<ErasedLocalState>>>;
+pub trait InPlaceStage: Any + Display {
+    fn init_local_state(&self, thread_index: usize) -> Result<Option<Box<dyn Any>>>;
     fn uses_channel(&self, c: usize) -> bool;
     fn ty(&self) -> DataTypeTag;
     fn is_special_case(&self) -> Option<StageSpecialCase>;
@@ -198,13 +191,13 @@ pub trait RunInPlaceStage<Buffer: PipelineBuffer>: InPlaceStage {
         &self,
         info: Buffer::InPlaceExtraInfo,
         buffers: &mut [&mut Buffer],
-        state: Option<&mut ErasedLocalState>,
+        state: Option<&mut dyn Any>,
     );
 }
 
 impl<T: RenderPipelineInPlaceStage> InPlaceStage for T {
-    fn init_local_state(&self) -> Result<Option<Box<ErasedLocalState>>> {
-        self.init_local_state()
+    fn init_local_state(&self, thread_index: usize) -> Result<Option<Box<dyn Any>>> {
+        self.init_local_state(thread_index)
     }
     fn uses_channel(&self, c: usize) -> bool {
         self.uses_channel(c)
@@ -217,8 +210,8 @@ impl<T: RenderPipelineInPlaceStage> InPlaceStage for T {
     }
 }
 
-pub trait InOutStage: Any + Display + Send + Sync {
-    fn init_local_state(&self) -> Result<Option<Box<ErasedLocalState>>>;
+pub trait InOutStage: Any + Display {
+    fn init_local_state(&self, thread_index: usize) -> Result<Option<Box<dyn Any>>>;
     fn shift(&self) -> (u8, u8);
     fn border(&self) -> (u8, u8);
     fn uses_channel(&self, c: usize) -> bool;
@@ -228,8 +221,8 @@ pub trait InOutStage: Any + Display + Send + Sync {
 }
 
 impl<T: RenderPipelineInOutStage> InOutStage for T {
-    fn init_local_state(&self) -> Result<Option<Box<ErasedLocalState>>> {
-        self.init_local_state()
+    fn init_local_state(&self, thread_index: usize) -> Result<Option<Box<dyn Any>>> {
+        self.init_local_state(thread_index)
     }
     fn uses_channel(&self, c: usize) -> bool {
         self.uses_channel(c)
@@ -257,6 +250,6 @@ pub trait RunInOutStage<Buffer: PipelineBuffer>: InOutStage {
         info: Buffer::InOutExtraInfo,
         input_buffers: &[&Buffer],
         output_buffers: &mut [Buffer],
-        state: Option<&mut ErasedLocalState>,
+        state: Option<&mut dyn Any>,
     );
 }

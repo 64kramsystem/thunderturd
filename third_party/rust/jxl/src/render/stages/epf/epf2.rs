@@ -3,13 +3,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use jxl_simd::{F32SimdVec, SimdMask, simd_function};
+use std::sync::Arc;
 
-use crate::features::epf::SigmaSource;
-use crate::render::stages::epf::common::{get_sigma, prepare_sad_mul_storage};
-use crate::render::{Channels, ChannelsMut, ErasedLocalState, RenderPipelineInOutStage};
-use crate::util::sync::{Arc, RwLock};
-use crate::{BLOCK_DIM, MIN_SIGMA};
+use crate::{
+    BLOCK_DIM, MIN_SIGMA,
+    features::epf::SigmaSource,
+    render::{
+        Channels, ChannelsMut, RenderPipelineInOutStage,
+        stages::epf::common::{get_sigma, prepare_sad_mul_storage},
+    },
+    util::AtomicRefCell,
+};
+
+use jxl_simd::{F32SimdVec, SimdMask, simd_function};
 
 /// 3x3 plus-shaped kernel with 1 SAD per pixel. So this makes this filter a 3x3 filter.
 pub struct Epf2Stage {
@@ -18,7 +24,7 @@ pub struct Epf2Stage {
     /// (inverse) multiplier for sigma on borders
     border_sad_mul: f32,
     channel_scale: [f32; 3],
-    sigma: Arc<RwLock<SigmaSource>>,
+    sigma: Arc<AtomicRefCell<SigmaSource>>,
 }
 
 impl std::fmt::Display for Epf2Stage {
@@ -36,7 +42,7 @@ impl Epf2Stage {
         sigma_scale: f32,
         border_sad_mul: f32,
         channel_scale: [f32; 3],
-        sigma: Arc<RwLock<SigmaSource>>,
+        sigma: Arc<AtomicRefCell<SigmaSource>>,
     ) -> Self {
         Self {
             sigma,
@@ -62,7 +68,7 @@ fn epf2_process_row_chunk(
     let (input_x, input_y, input_b) = (&input_rows[0], &input_rows[1], &input_rows[2]);
     let (output_x, output_y, output_b) = output_rows.split_first_3_mut();
 
-    let sigma = stage.sigma.try_read().unwrap();
+    let sigma = stage.sigma.borrow();
     let row_sigma = sigma.row(ypos / BLOCK_DIM);
 
     const { assert!(D::F32Vec::LEN <= 16) };
@@ -146,8 +152,7 @@ impl RenderPipelineInOutStage for Epf2Stage {
         xsize: usize,
         input_rows: &Channels<f32>,
         output_rows: &mut ChannelsMut<f32>,
-        _state: Option<&mut ErasedLocalState>,
-        _previous_call_was_previous_row: bool,
+        _state: Option<&mut dyn std::any::Any>,
     ) {
         epf2_process_row_chunk_dispatch(self, (xpos, ypos), xsize, input_rows, output_rows);
     }

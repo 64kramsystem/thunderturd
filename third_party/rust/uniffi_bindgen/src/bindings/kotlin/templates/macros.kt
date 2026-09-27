@@ -8,10 +8,10 @@
     {%- match func.self_type() %}
     {%- when Some(Type::Object { .. }) %}
     callWithHandle {
-        {%- call to_raw_ffi_call(func) %}{% endcall %}
+        {%- call to_raw_ffi_call(func) %}
     }
     {% else %}
-        {%- call to_raw_ffi_call(func) %}{% endcall %}
+        {%- call to_raw_ffi_call(func) %}
     {% endmatch %}
 {%- endmacro %}
 
@@ -34,13 +34,13 @@
         {{- t|lower_fn }}(this),
     {%- when None %}
     {% endmatch %}
-        {% call arg_list_lowered(func) %}{% endcall -%}
+        {% call arg_list_lowered(func) -%}
         _status)
 }
 {%- endmacro -%}
 
 {%- macro func_decl(func_decl, callable, indent) %}
-    {%- call docstring(callable, indent) %}{% endcall %}
+    {%- call docstring(callable, indent) %}
 
     {%- match callable.throws_type() -%}
     {%-     when Some(throwable) %}
@@ -50,43 +50,36 @@
     {%- if callable.is_async() %}
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
     {{ func_decl }} suspend fun {{ callable.name()|fn_name }}(
-        {%- call arg_list(callable, callable.self_type().is_none()) %}{% endcall -%}
+        {%- call arg_list(callable, callable.self_type().is_none()) -%}
     ){% match callable.return_type() %}{% when Some(return_type) %} : {{ return_type|type_name(ci) }}{% when None %}{%- endmatch %} {
-        return {% call call_async(callable) %}{% endcall %}
+        return {% call call_async(callable) %}
     }
     {%- else -%}
     {{ func_decl }} fun {{ callable.name()|fn_name }}(
-        {%- call arg_list(callable, callable.self_type().is_none()) %}{% endcall -%}
+        {%- call arg_list(callable, callable.self_type().is_none()) -%}
     ){%- match callable.return_type() -%}
     {%-         when Some(return_type) -%}
         : {{ return_type|type_name(ci) }} {
-            return {{ return_type|lift_fn }}({% call to_ffi_call(callable) %}{% endcall %})
+            return {{ return_type|lift_fn }}({% call to_ffi_call(callable) %})
     }
     {%-         when None %}
-        = {% call to_ffi_call(callable) %}{% endcall %}
+        = {% call to_ffi_call(callable) %}
     {%-     endmatch %}
     {% endif %}
 {% endmacro %}
 
 {%- macro call_async(callable) -%}
     uniffiRustCallAsync(
-
-{%- match callable.self_type() %}
-{%- when Some(Type::Object { .. }) %}
+{%- if callable.self_type().is_some() %}
         callWithHandle { uniffiHandle ->
             UniffiLib.{{ callable.ffi_func().name() }}(
                 uniffiHandle,
-                {% call arg_list_lowered(callable) %}{% endcall %}
+                {% call arg_list_lowered(callable) %}
             )
         },
-{%- when Some(t) %}
-        UniffiLib.{{ callable.ffi_func().name() }}(
-            {{- t|lower_fn }}(this),
-            {% call arg_list_lowered(callable) %}{% endcall %}
-        ),
 {%- else %}
-        UniffiLib.{{ callable.ffi_func().name() }}({% call arg_list_lowered(callable) %}{% endcall %}),
-{%- endmatch %}
+        UniffiLib.{{ callable.ffi_func().name() }}({% call arg_list_lowered(callable) %}),
+{%- endif %}
         {{ callable|async_poll(ci) }},
         {{ callable|async_complete(ci) }},
         {{ callable|async_free(ci) }},
@@ -113,7 +106,7 @@
 
 {%- macro arg_list_lowered(func) %}
     {%- for arg in func.arguments() %}
-        {{ arg|lower_fn_for_arg }}({{ arg.name()|var_name }}),
+        {{- arg|lower_fn }}({{ arg.name()|var_name }}),
     {%- endfor %}
 {%- endmacro -%}
 
@@ -125,7 +118,7 @@
 
 {% macro arg_list(func, is_decl) %}
 {%- for arg in func.arguments() -%}
-        {{ arg.name()|var_name }}: {{ arg|lower_type_name_for_arg(ci) }}
+        {{ arg.name()|var_name }}: {{ arg|type_name(ci) }}
 {%-     if is_decl %}
 {%-         match arg.default_value() %}
 {%-             when Some(default) %} = {{ default|render_default(arg, ci) }}
@@ -167,7 +160,7 @@ v{{- field_num -}}
 {%- macro destroy_fields(member) %}
     Disposable.destroy(
     {%- for field in member.fields() %}
-        this.{%- call field_name(field, loop.index) %}{% endcall -%}{% if loop.last %}{% else %},{% endif -%}
+        this.{%- call field_name(field, loop.index) -%}{% if loop.last %}{% else %},{% endif -%}
     {%- endfor %}
     )
 {%- endmacro -%}
@@ -181,7 +174,7 @@ v{{- field_num -}}
 {%- endmacro %}
 
 {%- macro docstring(defn, indent_spaces) %}
-{%- call docstring_value(defn.docstring(), indent_spaces) %}{% endcall %}
+{%- call docstring_value(defn.docstring(), indent_spaces) %}
 {%- endmacro %}
 
 // macro for uniffi_trait implementations.
@@ -190,26 +183,26 @@ v{{- field_num -}}
 {%- if let Some(fmt) = uniffi_trait_methods.display_fmt.or(uniffi_trait_methods.debug_fmt.clone()) %}
     // The local Rust `Display`/`Debug` implementation.
     override fun toString(): String {
-        return {{ fmt.return_type().unwrap()|lift_fn }}({% call to_ffi_call(fmt) %}{% endcall %})
+        return {{ fmt.return_type().unwrap()|lift_fn }}({% call to_ffi_call(fmt) %})
     }
 {%- endif %}
 {%- if let Some(eq) = uniffi_trait_methods.eq_eq %}
     // The local Rust `Eq` implementation - only `eq` is used.
     override fun equals(other: Any?): Boolean {
         if (other !is {{ eq.object_name()|class_name(ci) }}) return false
-        return {{ eq.return_type().unwrap()|lift_fn }}({% call to_ffi_call(eq) %}{% endcall %})
+        return {{ eq.return_type().unwrap()|lift_fn }}({% call to_ffi_call(eq) %})
     }
 {%- endif %}
 {%- if let Some(hash) = uniffi_trait_methods.hash_hash %}
     // The local Rust `Hash` implementation
     override fun hashCode(): Int {
-        return {{ hash.return_type().unwrap()|lift_fn }}({%- call to_ffi_call(hash) %}{% endcall %}).toInt()
+        return {{ hash.return_type().unwrap()|lift_fn }}({%- call to_ffi_call(hash) %}).toInt()
     }
 {%- endif %}
 {%- if let Some(cmp) = uniffi_trait_methods.ord_cmp %}
     // The local Rust `Ord` implementation
     override fun compareTo(other: {{ cmp.object_name()|class_name(ci) }}): Int {
-        return {{ cmp.return_type().unwrap()|lift_fn }}({%- call to_ffi_call(cmp) %}{% endcall %}).toInt()
+        return {{ cmp.return_type().unwrap()|lift_fn }}({%- call to_ffi_call(cmp) %}).toInt()
     }
 {%- endif %}
 {%- endmacro %}

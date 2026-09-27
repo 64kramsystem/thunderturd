@@ -11,14 +11,15 @@
 
 [package]
 edition = "2021"
-rust-version = "1.65"
+rust-version = "1.63"
 name = "libc"
-version = "0.2.186"
+version = "0.2.183"
 authors = ["The Rust Project Developers"]
 build = "build.rs"
 exclude = [
     "/ci/*",
     "/.github/*",
+    "/.cirrus.yml",
     "/triagebot.toml",
     "cherry-pick-stable.sh",
 ]

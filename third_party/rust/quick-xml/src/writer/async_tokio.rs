@@ -40,7 +40,6 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
             Event::Decl(e) => self.write_wrapped_async(b"<?", &e, b"?>").await,
             Event::PI(e) => self.write_wrapped_async(b"<?", &e, b"?>").await,
             Event::DocType(e) => self.write_wrapped_async(b"<!DOCTYPE ", &e, b">").await,
-            Event::GeneralRef(e) => self.write_wrapped_async(b"&", &e, b";").await,
             Event::Eof => Ok(()),
         };
         if let Some(i) = self.indent.as_mut() {

@@ -1,6 +1,6 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
-use wgpu_sync::RwLock;
+use parking_lot::RwLock;
 
 use glow::HasContext;
 

@@ -1,14 +1,12 @@
 //! [`Backend`], [`Backends`], and backend-specific options.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use core::{hash::Hash, str::FromStr};
-
-use macro_rules_attribute::derive;
 
 #[cfg(any(feature = "serde", test))]
 use serde::{Deserialize, Serialize};
 
-use crate::{link_to_wgpu_docs, ConstDefault};
+use crate::link_to_wgpu_docs;
 
 #[cfg(doc)]
 use crate::InstanceDescriptor;
@@ -41,29 +39,14 @@ pub enum Backend {
     /// enables it, in addition to the ordinary requirement of [`Backends::NOOP`] being set.
     /// This ensures that applications not desiring a non-functional backend will not receive it.
     Noop = 0,
-
     /// Vulkan API (Windows, Linux, Android, MacOS via `vulkan-portability`/MoltenVK)
     Vulkan = 1,
-
     /// Metal API (Apple platforms)
     Metal = 2,
-
     /// Direct3D-12 (Windows)
     Dx12 = 3,
-
-    /// OpenGL 3.3+, OpenGL ES 3.0+, WebGL2.
-    ///
-    /// - On Windows, this is normally OpenGL. If you build with
-    ///   `cfg(windows_angle)` to use ANGLE instead, then this is OpenGL ES.
-    ///
-    /// - On Linux, we create a full OpenGL context if possible (Mesa offers
-    ///   it), but if that fails we fall back to OpenGL ES.
-    ///
-    /// - On Android and macOS with ANGLE, we get OpenGL ES.
-    ///
-    /// - When running in a web browser, we get WebGL2.
+    /// OpenGL 3.3+ (Windows), OpenGL ES 3.0+ (Linux, Android, MacOS via Angle), and WebGL2
     Gl = 4,
-
     /// WebGPU in the browser
     BrowserWebGpu = 5,
 }
@@ -114,8 +97,8 @@ bitflags::bitflags! {
         const VULKAN = 1 << Backend::Vulkan as u32;
 
         /// [`Backend::Gl`].
-        /// Supported on Linux/Android, the web through webassembly via WebGL, and
-        /// Windows through native OpenGL by default or ANGLE with `cfg(windows_angle)`.
+        /// Supported on Linux/Android, the web through webassembly via WebGL, and Windows and
+        /// macOS/iOS via ANGLE
         const GL = 1 << Backend::Gl as u32;
 
         /// [`Backend::Metal`].
@@ -224,7 +207,7 @@ impl Backends {
 /// Options that are passed to a given backend.
 ///
 /// Part of [`InstanceDescriptor`].
-#[derive(Clone, Debug, Eq, PartialEq, ConstDefault!)]
+#[derive(Clone, Debug, Default)]
 pub struct BackendOptions {
     /// Options for the OpenGL/OpenGLES backend, [`Backend::Gl`].
     pub gl: GlBackendOptions,
@@ -263,7 +246,7 @@ impl BackendOptions {
 /// Configuration for the OpenGL/OpenGLES backend.
 ///
 /// Part of [`BackendOptions`].
-#[derive(Clone, Debug, Eq, PartialEq, ConstDefault!)]
+#[derive(Clone, Debug, Default)]
 pub struct GlBackendOptions {
     /// Which OpenGL ES 3 minor version to request, if using OpenGL ES.
     pub gles_minor_version: Gles3MinorVersion,
@@ -320,7 +303,7 @@ impl GlBackendOptions {
 ///
 /// Debug functions include `glPushDebugGroup`, `glPopDebugGroup`, `glObjectLabel`, etc.
 /// These are useful for debugging but can cause crashes on some buggy drivers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstDefault!)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum GlDebugFns {
     /// Automatically decide whether to enable debug functions.
     ///
@@ -329,7 +312,7 @@ pub enum GlDebugFns {
     /// (e.g., Mali GPUs which can crash in `glPushDebugGroup`).
     ///
     /// This is the default behavior.
-    #[custom(default)]
+    #[default]
     Auto,
     /// Force enable debug functions if supported by the driver.
     ///
@@ -379,7 +362,7 @@ impl GlDebugFns {
 
 /// Used to force wgpu to expose certain features on passthrough shaders even when
 /// those features aren't present on runtime-compiled shaders
-#[derive(Clone, Debug, Eq, PartialEq, ConstDefault!)]
+#[derive(Default, Clone, Debug)]
 pub struct ForceShaderModelToken {
     inner: Option<DxcShaderModel>,
 }
@@ -389,25 +372,25 @@ impl ForceShaderModelToken {
     /// # Safety
     /// Do not make use in runtime-compiled shaders of any features that may not be supported by the FXC or DXC
     /// version you use.
-    pub const unsafe fn with_shader_model(sm: DxcShaderModel) -> Self {
+    pub unsafe fn with_shader_model(sm: DxcShaderModel) -> Self {
         Self { inner: Some(sm) }
     }
 
     /// Returns the shader model version, if any, in this token.
-    pub const fn get(&self) -> Option<DxcShaderModel> {
-        self.inner
+    pub fn get(&self) -> Option<DxcShaderModel> {
+        self.inner.clone()
     }
 }
 
 /// Behavior when the Agility SDK fails to load.
 ///
 /// See [`Dx12AgilitySDK`] for details on the Agility SDK.
-#[derive(Clone, Copy, Debug, ConstDefault!, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dx12AgilitySDKLoadFailure {
     /// Log a warning and fall back to the system-installed D3D12 runtime.
     ///
     /// This is the default behavior and is appropriate for most applications.
-    #[custom(default)]
+    #[default]
     Fallback,
     /// Fail instance creation entirely if the Agility SDK cannot be loaded.
     ///
@@ -488,7 +471,7 @@ impl Dx12AgilitySDKLoadFailure {
 /// [win11-21h2]: https://support.microsoft.com/en-us/topic/august-22-2023-kb5029332-os-build-22000-2360-preview-8f8aec64-77b4-4225-9a0f-f0153204ae28
 /// [win10-22h2]: https://support.microsoft.com/en-gb/topic/august-22-2023-kb5029331-os-build-19045-3393-preview-9f6c1dbd-0ee6-469b-af24-f9d0bf35ca18
 /// [server-2022]: https://support.microsoft.com/en-au/topic/september-12-2023-kb5030216-os-build-20348-1970-34d4aff3-fd05-4270-b288-4ab6379c7f81
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Dx12AgilitySDK {
     /// The Agility SDK version number (e.g., 614 for SDK version 1.614.0).
     ///
@@ -550,7 +533,7 @@ impl Dx12AgilitySDK {
 /// Configuration for the DX12 backend.
 ///
 /// Part of [`BackendOptions`].
-#[derive(Clone, Debug, Eq, PartialEq, ConstDefault!)]
+#[derive(Clone, Debug, Default)]
 pub struct Dx12BackendOptions {
     /// Which DX12 shader compiler to use.
     pub shader_compiler: Dx12Compiler,
@@ -619,7 +602,7 @@ impl Dx12BackendOptions {
 /// Configuration for the noop backend.
 ///
 /// Part of [`BackendOptions`].
-#[derive(Clone, Debug, Eq, PartialEq, ConstDefault!)]
+#[derive(Clone, Debug, Default)]
 pub struct NoopBackendOptions {
     /// Whether to allow the noop backend to be used.
     ///
@@ -687,13 +670,13 @@ impl NoopBackendOptions {
     }
 }
 
-#[derive(Clone, Debug, ConstDefault!, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Copy, PartialEq, Eq)]
 /// Selects which kind of swapchain to use on DX12.
 pub enum Dx12SwapchainKind {
     /// Use a DXGI swapchain made directly from the window's HWND.
     ///
     /// This does not support transparency but has better support from developer tooling from RenderDoc.
-    #[custom(default)]
+    #[default]
     DxgiFromHwnd,
     /// Use a DXGI swapchain made from a DirectComposition visual made automatically from the window's HWND.
     ///
@@ -740,7 +723,7 @@ impl Dx12SwapchainKind {
 }
 
 /// DXC shader model.
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 #[allow(missing_docs)]
 pub enum DxcShaderModel {
     V6_0,
@@ -792,7 +775,7 @@ impl DxcShaderModel {
 }
 
 /// Selects which DX12 shader compiler to use.
-#[derive(Clone, Debug, Eq, PartialEq, ConstDefault!)]
+#[derive(Clone, Debug, Default)]
 pub enum Dx12Compiler {
     /// The Fxc compiler (default) is old, slow and unmaintained.
     ///
@@ -816,7 +799,7 @@ pub enum Dx12Compiler {
     /// Not available on `windows-aarch64-pc-*` targets.
     StaticDxc,
     /// Use statically-linked DXC if available. Otherwise check for dynamically linked DXC on the PATH. Finally, fallback to FXC.
-    #[custom(default)]
+    #[default]
     Auto,
 }
 
@@ -869,21 +852,19 @@ impl FromStr for Dx12Compiler {
             "staticdxc" => Self::StaticDxc,
             "fxc" => Self::Fxc,
             "auto" => Self::Auto,
-            path => Self::DynamicDxc {
-                dxc_path: path.to_string(),
-            },
+            _ => return Err("Expected `dynamicdxc` (alias `dxc`), `staticdxc`, `fxc`, or `auto`."),
         })
     }
 }
 
 /// Whether and how to use a waitable handle obtained from `GetFrameLatencyWaitableObject`.
-#[derive(Clone, Debug, Eq, PartialEq, ConstDefault!)]
+#[derive(Clone, Debug, Default)]
 pub enum Dx12UseFrameLatencyWaitableObject {
     /// Do not obtain a waitable handle and do not wait for it. The swapchain will
     /// be created without the `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` flag.
     None,
     /// Obtain a waitable handle and wait for it before acquiring the next swapchain image.
-    #[custom(default)]
+    #[default]
     Wait,
     /// Create the swapchain with the `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` flag and
     /// obtain a waitable handle, but do not wait for it before acquiring the next swapchain image.
@@ -927,10 +908,10 @@ impl Dx12UseFrameLatencyWaitableObject {
 /// Selects which OpenGL ES 3 minor version to request.
 ///
 /// When using ANGLE as an OpenGL ES/EGL implementation, explicitly requesting `Version1` can provide a non-conformant ES 3.1 on APIs like D3D11.
-#[derive(Clone, Copy, Debug, ConstDefault!, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub enum Gles3MinorVersion {
     /// No explicit minor version is requested, the driver automatically picks the highest available.
-    #[custom(default)]
+    #[default]
     Automatic,
 
     /// Request an ES 3.0 context.
@@ -977,10 +958,10 @@ impl Gles3MinorVersion {
 }
 
 /// Dictate the behavior of fences in OpenGL.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstDefault!)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum GlFenceBehavior {
     /// Fences in OpenGL behave normally. If you don't know what to pick, this is what you want.
-    #[custom(default)]
+    #[default]
     Normal,
     /// Fences in OpenGL are short-circuited to always return `true` immediately.
     ///

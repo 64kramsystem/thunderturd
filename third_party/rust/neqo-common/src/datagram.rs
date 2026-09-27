@@ -11,7 +11,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{Bytes, Tos, hex::HexWithLen};
+use crate::{Bytes, Tos, hex_with_len};
 
 /// A UDP datagram.
 ///
@@ -118,7 +118,7 @@ impl<D: AsRef<[u8]>> Debug for Datagram<D> {
             self.tos,
             self.src,
             self.dst,
-            HexWithLen::new(&self.d)
+            hex_with_len(&self.d)
         )
     }
 }
@@ -173,7 +173,7 @@ impl Debug for Batch {
             self.src,
             self.dst,
             self.datagram_size,
-            HexWithLen::new(&self.d)
+            hex_with_len(&self.d)
         )
     }
 }

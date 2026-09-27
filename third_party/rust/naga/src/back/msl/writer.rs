@@ -33,6 +33,9 @@ use crate::{
     valid, FastHashMap, FastHashSet,
 };
 
+#[cfg(test)]
+use core::ptr;
+
 // This is a hack: we need to pass a pointer to an atomic,
 // but generally the backend isn't putting "&" in front of every pointer.
 // Some more general handling of pointers is needed to be implemented here.
@@ -370,28 +373,16 @@ impl Display for TypeContext<'_> {
                 write!(out, "{}", super::ray::metal_intersector_ty())
             }
             crate::TypeInner::BindingArray { base, .. } => {
-                let base_inner = &self.gctx.types[base].inner;
                 let base_tyname = Self {
                     handle: base,
                     first_time: false,
                     ..*self
                 };
-                match *base_inner {
-                    crate::TypeInner::Struct { .. } => {
-                        // Buffers in a binding array are pointers declared as `device T*`, so members use `->`.
-                        // Textures and samplers stay as plain values inside the wrapper.
-                        write!(
-                            out,
-                            "device {ARGUMENT_BUFFER_WRAPPER_STRUCT}<device {base_tyname}*>*"
-                        )
-                    }
-                    _ => {
-                        write!(
-                            out,
-                            "constant {ARGUMENT_BUFFER_WRAPPER_STRUCT}<{base_tyname}>*"
-                        )
-                    }
-                }
+
+                write!(
+                    out,
+                    "constant {ARGUMENT_BUFFER_WRAPPER_STRUCT}<{base_tyname}>*"
+                )
             }
         }
     }
@@ -442,36 +433,29 @@ impl TypedGlobalVariable<'_> {
             first_time: false,
         };
 
-        let (coherent, space, access, reference) = if matches!(
-            self.module.types[var.ty].inner,
-            crate::TypeInner::BindingArray { .. }
-        ) {
-            ("", "", "", "")
+        let access = if var.space.needs_access_qualifier()
+            && !self.usage.intersects(valid::GlobalUse::WRITE)
+        {
+            "const"
         } else {
-            let access = if var.space.needs_access_qualifier()
-                && !self.usage.intersects(valid::GlobalUse::WRITE)
-            {
-                "const"
-            } else {
-                ""
-            };
-            match (var.space.to_msl_name(), var.space) {
-                (Some(space), crate::AddressSpace::WorkGroup) => {
-                    ("", space, access, if self.reference { "&" } else { "" })
-                }
-                (Some(space), _) if self.reference => {
-                    let coherent = if var
-                        .memory_decorations
-                        .contains(crate::MemoryDecorations::COHERENT)
-                    {
-                        "coherent "
-                    } else {
-                        ""
-                    };
-                    (coherent, space, access, "&")
-                }
-                _ => ("", "", "", ""),
+            ""
+        };
+        let (coherent, space, access, reference) = match (var.space.to_msl_name(), var.space) {
+            (Some(space), crate::AddressSpace::WorkGroup) => {
+                ("", space, access, if self.reference { "&" } else { "" })
             }
+            (Some(space), _) if self.reference => {
+                let coherent = if var
+                    .memory_decorations
+                    .contains(crate::MemoryDecorations::COHERENT)
+                {
+                    "coherent "
+                } else {
+                    ""
+                };
+                (coherent, space, access, "&")
+            }
+            _ => ("", "", "", ""),
         };
 
         let ty = format!(
@@ -533,15 +517,13 @@ pub(super) enum WrappedFunction {
         columns: crate::CooperativeSize,
         rows: crate::CooperativeSize,
         intermediate: crate::CooperativeSize,
-        ab_scalar: crate::Scalar,
-        c_scalar: crate::Scalar,
+        scalar: crate::Scalar,
     },
     RayQueryGetIntersection {
         committed: bool,
     },
 }
 
-#[expect(missing_debug_implementations, reason = "would be way too verbose?")]
 pub struct Writer<W> {
     pub(super) out: W,
     pub(super) names: FastHashMap<NameKey, String>,
@@ -550,7 +532,10 @@ pub struct Writer<W> {
     need_bake_expressions: back::NeedBakeExpressions,
     pub(super) namer: proc::Namer,
     pub(super) wrapped_functions: FastHashSet<WrappedFunction>,
-    emit_int_div_checks: bool,
+    #[cfg(test)]
+    put_expression_stack_pointers: FastHashSet<*const ()>,
+    #[cfg(test)]
+    put_block_stack_pointers: FastHashSet<*const ()>,
     /// Set of (struct type, struct field index) denoting which fields require
     /// padding inserted **before** them (i.e. between fields at index - 1 and index)
     struct_member_pads: FastHashSet<(Handle<crate::Type>, u32)>,
@@ -639,6 +624,28 @@ fn should_pack_struct_member(
     }
 }
 
+fn needs_array_length(ty: Handle<crate::Type>, arena: &crate::UniqueArena<crate::Type>) -> bool {
+    match arena[ty].inner {
+        crate::TypeInner::Struct { ref members, .. } => {
+            if let Some(member) = members.last() {
+                if let crate::TypeInner::Array {
+                    size: crate::ArraySize::Dynamic,
+                    ..
+                } = arena[member.ty].inner
+                {
+                    return true;
+                }
+            }
+            false
+        }
+        crate::TypeInner::Array {
+            size: crate::ArraySize::Dynamic,
+            ..
+        } => true,
+        _ => false,
+    }
+}
+
 impl crate::AddressSpace {
     /// Returns true if global variables in this address space are
     /// passed in function arguments. These arguments need to be
@@ -719,12 +726,12 @@ impl crate::Type {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum FunctionOrigin {
+enum FunctionOrigin {
     Handle(Handle<crate::Function>),
     EntryPoint(proc::EntryPointIndex),
 }
 
-pub(super) trait NameKeyExt {
+trait NameKeyExt {
     fn local(origin: FunctionOrigin, local_handle: Handle<crate::LocalVariable>) -> NameKey {
         match origin {
             FunctionOrigin::Handle(handle) => NameKey::FunctionLocal(handle, local_handle),
@@ -779,7 +786,7 @@ struct TexelAddress {
 
 pub(super) struct ExpressionContext<'a> {
     pub(super) function: &'a crate::Function,
-    pub(super) origin: FunctionOrigin,
+    origin: FunctionOrigin,
     pub(super) info: &'a valid::FunctionInfo,
     pub(super) module: &'a crate::Module,
     pub(super) mod_info: &'a valid::ModuleInfo,
@@ -793,79 +800,11 @@ pub(super) struct ExpressionContext<'a> {
     pub(super) guarded_indices: HandleSet<crate::Expression>,
     /// See [`Writer::gen_force_bounded_loop_statements`] for details.
     pub(super) force_loop_bounding: bool,
-    /// Whether to emit safety checks for integer division/modulo.
-    emit_int_div_checks: bool,
-    pub(super) ray_query_initialization_tracking: bool,
 }
 
 impl<'a> ExpressionContext<'a> {
     fn resolve_type(&self, handle: Handle<crate::Expression>) -> &'a crate::TypeInner {
         self.info[handle].ty.inner_with(&self.module.types)
-    }
-
-    /// Walks from an inner pointer toward a storage binding array global and
-    /// returns the element index at that global for MSL runtime buffer sizing.
-    fn binding_array_index_from_chain(
-        &self,
-        mut expr: Handle<crate::Expression>,
-        global: Handle<crate::GlobalVariable>,
-    ) -> Option<index::GuardedIndex> {
-        let expressions = &self.function.expressions;
-        loop {
-            match expressions[expr] {
-                crate::Expression::Load { pointer } => expr = pointer,
-                crate::Expression::Access { base, index } => {
-                    if matches!(
-                        expressions[base],
-                        crate::Expression::GlobalVariable(g) if g == global
-                    ) {
-                        return Some(index::GuardedIndex::Expression(index));
-                    }
-                    expr = base;
-                }
-                crate::Expression::AccessIndex { base, index } => {
-                    if matches!(
-                        expressions[base],
-                        crate::Expression::GlobalVariable(g) if g == global
-                    ) {
-                        return Some(index::GuardedIndex::Known(index));
-                    }
-                    expr = base;
-                }
-                crate::Expression::GlobalVariable(_) => return None,
-                _ => return None,
-            }
-        }
-    }
-
-    /// Whether `expr` is directly indexing a global in the outer `Access`/`AccessIndex` shape.
-    fn is_global_access_chain(&self, expr: Handle<crate::Expression>) -> bool {
-        let expressions = &self.function.expressions;
-        match expressions[expr] {
-            crate::Expression::Access { base, .. } => match expressions[base] {
-                crate::Expression::GlobalVariable(_) => true,
-                crate::Expression::Access { .. } => self.is_global_access_chain(base),
-                _ => false,
-            },
-            crate::Expression::AccessIndex { base, .. } => {
-                matches!(expressions[base], crate::Expression::GlobalVariable(_))
-            }
-            _ => false,
-        }
-    }
-
-    fn struct_member_needs_arrow(
-        &self,
-        base: Handle<crate::Expression>,
-        originating_global_ty: impl FnOnce(&crate::TypeInner) -> bool,
-    ) -> bool {
-        let originating_matches = match self.function.originating_global(base) {
-            Some(gv) => {
-                originating_global_ty(&self.module.types[self.module.global_variables[gv].ty].inner)
-            }
-            None => false,
-        };
-        originating_matches && self.is_global_access_chain(base)
     }
 
     /// Return true if calls to `image`'s `read` and `write` methods should supply a level of detail.
@@ -953,7 +892,10 @@ impl<W: Write> Writer<W> {
             need_bake_expressions: Default::default(),
             namer: proc::Namer::default(),
             wrapped_functions: FastHashSet::default(),
-            emit_int_div_checks: true,
+            #[cfg(test)]
+            put_expression_stack_pointers: Default::default(),
+            #[cfg(test)]
+            put_block_stack_pointers: Default::default(),
             struct_member_pads: FastHashSet::default(),
             needs_object_memory_barriers: false,
         }
@@ -1172,27 +1114,6 @@ impl<W: Write> Writer<W> {
                 }
             };
             writeln!(self.out, ";")?;
-
-            // If this variable is a ray query, put in an initialization tracker.
-            if context.ray_query_initialization_tracking {
-                if let crate::TypeInner::RayQuery { .. } = context.module.types[ty].inner {
-                    writeln!(
-                        self.out,
-                        "{}uint {}{} = 0u;",
-                        back::INDENT,
-                        super::ray::RAY_QUERY_TRACKER_VARIABLE_PREFIX,
-                        self.names[&name_key]
-                    )?;
-
-                    writeln!(
-                        self.out,
-                        "{}float {}{} = 0.0;",
-                        back::INDENT,
-                        super::ray::RAY_QUERY_T_MAX_TRACKER_VARIABLE_PREFIX,
-                        self.names[&name_key]
-                    )?;
-                }
-            }
         }
         Ok(())
     }
@@ -1663,51 +1584,9 @@ impl<W: Write> Writer<W> {
     ///
     /// `handle` must be the handle of a global variable whose final member is a
     /// dynamically sized array.
-    ///
-    /// `chain_expr` sits on the pointer path from an inner access, such as the
-    /// value passed to array length, back toward this global. For storage binding
-    /// arrays, that path tells us which element index to use in `_buffer_sizes`.
-    fn binding_array_layout_count(
-        module: &crate::Module,
-        pipeline_options: &PipelineOptions,
-        global: Handle<crate::GlobalVariable>,
-    ) -> u32 {
-        let var = &module.global_variables[global];
-        let crate::TypeInner::BindingArray { size, .. } = module.types[var.ty].inner else {
-            unreachable!("binding_array_layout_count called on non-binding-array global");
-        };
-        let from_shader = match size {
-            crate::ArraySize::Constant(n) => n.get(),
-            crate::ArraySize::Pending(_) | crate::ArraySize::Dynamic => 0,
-        };
-        let from_layout = var
-            .binding
-            .and_then(|br| pipeline_options.binding_array_length_map.get(&br))
-            .copied()
-            .unwrap_or(0);
-        from_shader.max(from_layout).max(1)
-    }
-
-    fn put_binding_array_size_member_index(
-        &mut self,
-        index: index::GuardedIndex,
-        context: &ExpressionContext,
-    ) -> BackendResult {
-        match index {
-            index::GuardedIndex::Expression(expr) => {
-                write!(self.out, "unsigned(")?;
-                self.put_expression(expr, context, true)?;
-                write!(self.out, ")")?;
-            }
-            index::GuardedIndex::Known(value) => write!(self.out, "{value}u")?,
-        }
-        Ok(())
-    }
-
     fn put_dynamic_array_max_index(
         &mut self,
         handle: Handle<crate::GlobalVariable>,
-        chain_expr: Handle<crate::Expression>,
         context: &ExpressionContext,
     ) -> BackendResult {
         let global = &context.module.global_variables[handle];
@@ -1715,18 +1594,6 @@ impl<W: Write> Writer<W> {
             crate::TypeInner::Struct { ref members, .. } => match members.last() {
                 Some(&crate::StructMember { offset, ty, .. }) => (offset, ty),
                 None => return Err(Error::GenericValidation("Struct has no members".into())),
-            },
-            crate::TypeInner::BindingArray { base, .. } => match context.module.types[base].inner {
-                crate::TypeInner::Struct { ref members, .. } => match members.last() {
-                    Some(&crate::StructMember { offset, ty, .. }) => (offset, ty),
-                    None => return Err(Error::GenericValidation("Struct has no members".into())),
-                },
-                _ => {
-                    return Err(Error::GenericValidation(
-                        "binding_array element must be a struct with a runtime-sized array field"
-                            .into(),
-                    ))
-                }
             },
             crate::TypeInner::Array {
                 size: crate::ArraySize::Dynamic,
@@ -1767,32 +1634,8 @@ impl<W: Write> Writer<W> {
         // prevent that.
         write!(
             self.out,
-            "(_buffer_sizes.{member}",
+            "(_buffer_sizes.{member} - {offset} - {size}) / {stride}",
             member = ArraySizeMember(handle),
-        )?;
-        if let crate::TypeInner::BindingArray { .. } = context.module.types[global.ty].inner {
-            let Some(array_index) = context.binding_array_index_from_chain(chain_expr, handle)
-            else {
-                return Err(Error::GenericValidation(
-                    "Could not find binding_array index for buffer size".into(),
-                ));
-            };
-            write!(self.out, "[")?;
-            match array_index {
-                index::GuardedIndex::Expression(expr) => {
-                    write!(self.out, "unsigned(")?;
-                    self.put_expression(expr, context, true)?;
-                    write!(self.out, ")")?;
-                }
-                index::GuardedIndex::Known(i) => {
-                    write!(self.out, "{i}u")?;
-                }
-            }
-            write!(self.out, "]")?;
-        }
-        write!(
-            self.out,
-            " - {offset} - {size}) / {stride}",
             offset = offset,
             size = size,
             stride = stride,
@@ -2137,6 +1980,11 @@ impl<W: Write> Writer<W> {
         context: &ExpressionContext,
         is_scoped: bool,
     ) -> BackendResult {
+        // Add to the set in order to track the stack size.
+        #[cfg(test)]
+        self.put_expression_stack_pointers
+            .insert(ptr::from_ref(&expr_handle).cast());
+
         if let Some(name) = self.named_expressions.get(&expr_handle) {
             write!(self.out, "{name}")?;
             return Ok(());
@@ -2406,7 +2254,6 @@ impl<W: Write> Writer<W> {
 
                 if op == crate::BinaryOperator::Divide
                     && (kind == crate::ScalarKind::Sint || kind == crate::ScalarKind::Uint)
-                    && context.emit_int_div_checks
                 {
                     write!(self.out, "{DIV_FUNCTION}(")?;
                     self.put_expression(left, context, true)?;
@@ -2415,7 +2262,6 @@ impl<W: Write> Writer<W> {
                     write!(self.out, ")")?;
                 } else if op == crate::BinaryOperator::Modulo
                     && (kind == crate::ScalarKind::Sint || kind == crate::ScalarKind::Uint)
-                    && context.emit_int_div_checks
                 {
                     write!(self.out, "{MOD_FUNCTION}(")?;
                     self.put_expression(left, context, true)?;
@@ -3031,18 +2877,31 @@ impl<W: Write> Writer<W> {
                 unreachable!()
             }
             crate::Expression::ArrayLength(expr) => {
-                let global = context.function.originating_global(expr).ok_or_else(|| {
-                    Error::GenericValidation(format!(
-                        "Could not find global variable for ArrayLength operand {:?}",
-                        context.function.expressions[expr]
-                    ))
-                })?;
+                // Find the global to which the array belongs.
+                let global = match context.function.expressions[expr] {
+                    crate::Expression::AccessIndex { base, .. } => {
+                        match context.function.expressions[base] {
+                            crate::Expression::GlobalVariable(handle) => handle,
+                            ref ex => {
+                                return Err(Error::GenericValidation(format!(
+                                    "Expected global variable in AccessIndex, got {ex:?}"
+                                )))
+                            }
+                        }
+                    }
+                    crate::Expression::GlobalVariable(handle) => handle,
+                    ref ex => {
+                        return Err(Error::GenericValidation(format!(
+                            "Unexpected expression in ArrayLength, got {ex:?}"
+                        )))
+                    }
+                };
 
                 if !is_scoped {
                     write!(self.out, "(")?;
                 }
                 write!(self.out, "1 + ")?;
-                self.put_dynamic_array_max_index(global, expr, context)?;
+                self.put_dynamic_array_max_index(global, context)?;
                 if !is_scoped {
                     write!(self.out, ")")?;
                 }
@@ -3055,28 +2914,12 @@ impl<W: Write> Writer<W> {
                     return Err(Error::UnsupportedRayTracing);
                 }
 
-                // See comment in `write_ray_query_stmt` for why this is valid
-                let crate::Expression::LocalVariable(query_var) =
-                    context.function.expressions[query]
-                else {
-                    unreachable!()
-                };
-
-                let tracker_expr_name = format!(
-                    "{}{}",
-                    super::ray::RAY_QUERY_TRACKER_VARIABLE_PREFIX,
-                    self.names[&NameKey::local(context.origin, query_var)]
-                );
-
                 write!(
                     self.out,
                     "{}_{committed}(",
                     super::ray::INTERSECTION_FUNCTION_NAME
                 )?;
                 self.put_expression(query, context, true)?;
-                if context.ray_query_initialization_tracking {
-                    write!(self.out, ", {tracker_expr_name}")?;
-                }
                 write!(self.out, ")")?;
             }
             crate::Expression::CooperativeLoad { ref data, .. } => {
@@ -3351,26 +3194,8 @@ impl<W: Write> Writer<W> {
                     let global = context.function.originating_global(base).ok_or_else(|| {
                         Error::GenericValidation("Could not find originating global".into())
                     })?;
-                    if matches!(
-                        context.module.types[context.module.global_variables[global].ty].inner,
-                        crate::TypeInner::BindingArray { .. }
-                    ) {
-                        write!(
-                            self.out,
-                            "{} && _buffer_sizes.{}[",
-                            Self::binding_array_layout_count(
-                                context.module,
-                                context.pipeline_options,
-                                global,
-                            ),
-                            ArraySizeMember(global),
-                        )?;
-                        self.put_binding_array_size_member_index(index, context)?;
-                        write!(self.out, "] != 0u")?;
-                    } else {
-                        write!(self.out, "1 + ")?;
-                        self.put_dynamic_array_max_index(global, base, context)?
-                    }
+                    write!(self.out, "1 + ")?;
+                    self.put_dynamic_array_max_index(global, context)?
                 }
             }
         }
@@ -3439,17 +3264,7 @@ impl<W: Write> Writer<W> {
                         let base_ty = base_ty_handle.unwrap();
                         self.put_access_chain(base, policy, context)?;
                         let name = &self.names[&NameKey::StructMember(base_ty, index)];
-                        write!(
-                            self.out,
-                            "{}{name}",
-                            if context.struct_member_needs_arrow(base, |ty| {
-                                matches!(ty, crate::TypeInner::BindingArray { .. })
-                            }) {
-                                "->"
-                            } else {
-                                "."
-                            },
-                        )?;
+                        write!(self.out, ".{name}")?;
                     }
                     crate::TypeInner::ValuePointer { .. } | crate::TypeInner::Vector { .. } => {
                         self.put_access_chain(base, policy, context)?;
@@ -3536,7 +3351,7 @@ impl<W: Write> Writer<W> {
                     let global = context.function.originating_global(base).ok_or_else(|| {
                         Error::GenericValidation("Could not find originating global".into())
                     })?;
-                    self.put_dynamic_array_max_index(global, base, context)?;
+                    self.put_dynamic_array_max_index(global, context)?;
                 }
             }
             write!(self.out, ")")?;
@@ -3624,7 +3439,7 @@ impl<W: Write> Writer<W> {
                 let result_ty = context.function.result.as_ref().unwrap().ty;
                 match context.module.types[result_ty].inner {
                     crate::TypeInner::Struct { ref members, .. } => {
-                        let tmp = self.namer.call("_tmp");
+                        let tmp = "_tmp";
                         write!(self.out, "{level}const auto {tmp} = ")?;
                         self.put_expression(expr_handle, context, true)?;
                         writeln!(self.out, ";")?;
@@ -3926,6 +3741,11 @@ impl<W: Write> Writer<W> {
         statements: &[crate::Statement],
         context: &StatementContext,
     ) -> BackendResult {
+        // Add to the set in order to track the stack size.
+        #[cfg(test)]
+        self.put_block_stack_pointers
+            .insert(ptr::from_ref(&level).cast());
+
         for statement in statements {
             log::trace!("statement[{}] {:?}", level.0, statement);
             match *statement {
@@ -4196,9 +4016,8 @@ impl<W: Write> Writer<W> {
                             }
                             write!(self.out, "{name}")?;
                         }
-                        needs_buffer_sizes |= context.expression.module.types[var.ty]
-                            .inner
-                            .needs_host_buffer_byte_size(&context.expression.module.types);
+                        needs_buffer_sizes |=
+                            needs_array_length(var.ty, &context.expression.module.types);
                     }
                     if needs_buffer_sizes {
                         if separate {
@@ -4545,7 +4364,6 @@ impl<W: Write> Writer<W> {
         options: &Options,
         pipeline_options: &PipelineOptions,
     ) -> Result<TranslationInfo, Error> {
-        self.emit_int_div_checks = options.emit_int_div_checks;
         self.names.clear();
         self.namer.reset(
             module,
@@ -4555,8 +4373,6 @@ impl<W: Write> Writer<W> {
             &[
                 CLAMPED_LOD_LOAD_PREFIX,
                 super::ray::INTERSECTION_FUNCTION_NAME,
-                super::ray::RAY_QUERY_TRACKER_VARIABLE_PREFIX,
-                super::ray::RAY_QUERY_T_MAX_TRACKER_VARIABLE_PREFIX,
             ],
             &mut self.names,
         );
@@ -4604,11 +4420,7 @@ impl<W: Write> Writer<W> {
             let globals: Vec<Handle<crate::GlobalVariable>> = module
                 .global_variables
                 .iter()
-                .filter(|&(_, var)| {
-                    module.types[var.ty]
-                        .inner
-                        .needs_host_buffer_byte_size(&module.types)
-                })
+                .filter(|&(_, var)| needs_array_length(var.ty, &module.types))
                 .map(|(handle, _)| handle)
                 .collect();
 
@@ -4621,26 +4433,12 @@ impl<W: Write> Writer<W> {
                 writeln!(self.out, "struct _mslBufferSizes {{")?;
 
                 for global in globals {
-                    let var = &module.global_variables[global];
-                    let var_ty = var.ty;
-                    match module.types[var_ty].inner {
-                        crate::TypeInner::BindingArray { .. } => {
-                            let n =
-                                Self::binding_array_layout_count(module, pipeline_options, global);
-                            writeln!(
-                                self.out,
-                                "{}uint {}[{n}];",
-                                back::INDENT,
-                                ArraySizeMember(global),
-                            )?;
-                        }
-                        _ => writeln!(
-                            self.out,
-                            "{}uint {};",
-                            back::INDENT,
-                            ArraySizeMember(global)
-                        )?,
-                    }
+                    writeln!(
+                        self.out,
+                        "{}uint {};",
+                        back::INDENT,
+                        ArraySizeMember(global)
+                    )?;
                 }
 
                 for idx in buffer_indices {
@@ -4957,7 +4755,6 @@ template <typename A>
         &mut self,
         level: back::Level,
         sampler: &sm::InlineSampler,
-        options: &Options,
     ) -> BackendResult {
         for (&letter, address) in ['s', 't', 'r'].iter().zip(sampler.address.iter()) {
             writeln!(
@@ -5002,26 +4799,17 @@ template <typename A>
                 sampler.border_color.as_str(),
             )?;
         }
-
-        if options.lang_version >= (1, 2) {
+        //TODO: I'm not able to feed this in a way that MSL likes:
+        //>error: use of undeclared identifier 'lod_clamp'
+        //>error: no member named 'max_anisotropy' in namespace 'metal'
+        if false {
             if let Some(ref lod) = sampler.lod_clamp {
-                writeln!(
-                    self.out,
-                    "{}{}::lod_clamp({},{}),",
-                    level, NAMESPACE, lod.start, lod.end,
-                )?;
+                writeln!(self.out, "{}lod_clamp({},{}),", level, lod.start, lod.end,)?;
             }
             if let Some(aniso) = sampler.max_anisotropy {
-                writeln!(
-                    self.out,
-                    "{}{}::max_anisotropy({}),",
-                    level,
-                    NAMESPACE,
-                    aniso.get(),
-                )?;
+                writeln!(self.out, "{}max_anisotropy({}),", level, aniso.get(),)?;
             }
         }
-
         if sampler.compare_func != sm::CompareFunc::Never {
             writeln!(
                 self.out,
@@ -5043,10 +4831,10 @@ template <typename A>
 
     fn write_unpacking_function(
         &mut self,
-        format: nt::VertexFormat,
+        format: back::msl::VertexFormat,
     ) -> Result<(String, u32, Option<crate::VectorSize>, crate::Scalar), Error> {
         use crate::{Scalar, VectorSize};
-        use nt::VertexFormat::*;
+        use back::msl::VertexFormat::*;
         match format {
             Uint8 => {
                 let name = self.namer.call("unpackUint8");
@@ -5844,7 +5632,6 @@ template <typename A>
                 writeln!(self.out, "}}")?;
                 Ok((name, 4, Some(VectorSize::Quad), Scalar::F32))
             }
-            Float64 | Float64x2 | Float64x3 | Float64x4 => unreachable!(),
         }
     }
 
@@ -5940,7 +5727,7 @@ template <typename A>
             (
                 crate::BinaryOperator::Divide,
                 Some(crate::ScalarKind::Sint | crate::ScalarKind::Uint),
-            ) if self.emit_int_div_checks => {
+            ) => {
                 let Some(left_wrapped_ty) = left_ty.vector_size_and_scalar() else {
                     return Ok(());
                 };
@@ -6023,7 +5810,7 @@ template <typename A>
             (
                 crate::BinaryOperator::Modulo,
                 Some(crate::ScalarKind::Sint | crate::ScalarKind::Uint),
-            ) if self.emit_int_div_checks => {
+            ) => {
                 let Some(left_wrapped_ty) = left_ty.vector_size_and_scalar() else {
                     return Ok(());
                 };
@@ -6678,10 +6465,9 @@ template <typename A>
         space: crate::AddressSpace,
         a: Handle<crate::Expression>,
         b: Handle<crate::Expression>,
-        c: Handle<crate::Expression>,
     ) -> BackendResult {
         let space_name = space.to_msl_name().unwrap_or_default();
-        let (a_c, a_r, ab_scalar) = match *func_ctx.resolve_type(a, &module.types) {
+        let (a_c, a_r, scalar) = match *func_ctx.resolve_type(a, &module.types) {
             crate::TypeInner::CooperativeMatrix {
                 columns,
                 rows,
@@ -6694,32 +6480,26 @@ template <typename A>
             crate::TypeInner::CooperativeMatrix { columns, rows, .. } => (columns, rows),
             _ => unreachable!(),
         };
-        let c_scalar = match *func_ctx.resolve_type(c, &module.types) {
-            crate::TypeInner::CooperativeMatrix { scalar, .. } => scalar,
-            _ => unreachable!(),
-        };
         let wrapped = WrappedFunction::CooperativeMultiplyAdd {
             space_name,
             columns: b_c,
             rows: a_r,
             intermediate: a_c,
-            ab_scalar,
-            c_scalar,
+            scalar,
         };
         if !self.wrapped_functions.insert(wrapped) {
             return Ok(());
         }
-        let ab_scalar_name = ab_scalar.to_msl_name();
-        let c_scalar_name = c_scalar.to_msl_name();
+        let scalar_name = scalar.to_msl_name();
         writeln!(
             self.out,
-            "{NAMESPACE}::simdgroup_{c_scalar_name}{}x{} {COOPERATIVE_MULTIPLY_ADD_FUNCTION}(const {space_name} {NAMESPACE}::simdgroup_{ab_scalar_name}{}x{}& a, const {space_name} {NAMESPACE}::simdgroup_{ab_scalar_name}{}x{}& b, const {space_name} {NAMESPACE}::simdgroup_{c_scalar_name}{}x{}& c) {{",
+            "{NAMESPACE}::simdgroup_{scalar_name}{}x{} {COOPERATIVE_MULTIPLY_ADD_FUNCTION}(const {space_name} {NAMESPACE}::simdgroup_{scalar_name}{}x{}& a, const {space_name} {NAMESPACE}::simdgroup_{scalar_name}{}x{}& b, const {space_name} {NAMESPACE}::simdgroup_{scalar_name}{}x{}& c) {{",
             b_c as u32, a_r as u32, a_c as u32, a_r as u32, b_c as u32, b_r as u32, b_c as u32, a_r as u32,
         )?;
         let l1 = back::Level(1);
         writeln!(
             self.out,
-            "{l1}{NAMESPACE}::simdgroup_{c_scalar_name}{}x{} d;",
+            "{l1}{NAMESPACE}::simdgroup_{scalar_name}{}x{} d;",
             b_c as u32, a_r as u32
         )?;
         writeln!(self.out, "{l1}simdgroup_multiply_accumulate(d,a,b,c);")?;
@@ -6733,7 +6513,6 @@ template <typename A>
         &mut self,
         module: &crate::Module,
         func_ctx: &back::FunctionCtx,
-        options: &Options,
     ) -> BackendResult {
         for (expr_handle, expr) in func_ctx.expressions.iter() {
             match *expr {
@@ -6818,12 +6597,12 @@ template <typename A>
                         data.pointer,
                     )?;
                 }
-                crate::Expression::CooperativeMultiplyAdd { a, b, c } => {
+                crate::Expression::CooperativeMultiplyAdd { a, b, c: _ } => {
                     let space = crate::AddressSpace::Private;
-                    self.write_wrapped_cooperative_multiply_add(module, func_ctx, space, a, b, c)?;
+                    self.write_wrapped_cooperative_multiply_add(module, func_ctx, space, a, b)?;
                 }
                 crate::Expression::RayQueryGetIntersection { committed, .. } => {
-                    self.write_rq_get_intersection_function(module, committed, options)?;
+                    self.write_rq_get_intersection_function(module, committed)?;
                 }
                 _ => {}
             }
@@ -6840,7 +6619,7 @@ template <typename A>
         options: &Options,
         pipeline_options: &PipelineOptions,
     ) -> Result<TranslationInfo, Error> {
-        use nt::VertexFormat;
+        use back::msl::VertexFormat;
 
         // Define structs to hold resolved/generated data for vertex buffers and
         // their attributes.
@@ -6959,7 +6738,7 @@ template <typename A>
             };
 
             writeln!(self.out)?;
-            self.write_wrapped_functions(module, &ctx, options)?;
+            self.write_wrapped_functions(module, &ctx)?;
 
             let fun_info = &mod_info[fun_handle];
             pass_through_globals.clear();
@@ -6969,9 +6748,7 @@ template <typename A>
                     if var.space.needs_pass_through() {
                         pass_through_globals.push(handle);
                     }
-                    needs_buffer_sizes |= module.types[var.ty]
-                        .inner
-                        .needs_host_buffer_byte_size(&module.types);
+                    needs_buffer_sizes |= needs_array_length(var.ty, &module.types);
                 }
             }
 
@@ -6999,13 +6776,7 @@ template <typename A>
                     handle: arg.ty,
                     gctx: module.to_ctx(),
                     names: &self.names,
-                    access: match module.types[arg.ty].inner {
-                        crate::TypeInner::Image {
-                            class: crate::ImageClass::Storage { access, .. },
-                            ..
-                        } => access,
-                        _ => crate::StorageAccess::empty(),
-                    },
+                    access: crate::StorageAccess::empty(),
                     first_time: false,
                 };
                 let separator = separate(
@@ -7062,8 +6833,6 @@ template <typename A>
                     mod_info,
                     pipeline_options,
                     force_loop_bounding: options.force_loop_bounding,
-                    emit_int_div_checks: options.emit_int_div_checks,
-                    ray_query_initialization_tracking: options.ray_query_initialization_tracking,
                 },
                 result_struct: None,
             };
@@ -7107,7 +6876,7 @@ template <typename A>
                 named_expressions: &fun.named_expressions,
             };
 
-            self.write_wrapped_functions(module, &ctx, options)?;
+            self.write_wrapped_functions(module, &ctx)?;
 
             let (em_str, in_mode, out_mode, can_vertex_pull) = match ep.stage {
                 crate::ShaderStage::Vertex => (
@@ -7151,11 +6920,7 @@ template <typename A>
                     .global_variables
                     .iter()
                     .filter(|&(handle, _)| !fun_info[handle].is_empty())
-                    .any(|(_, var)| {
-                        module.types[var.ty]
-                            .inner
-                            .needs_host_buffer_byte_size(&module.types)
-                    });
+                    .any(|(_, var)| needs_array_length(var.ty, &module.types));
 
             // skip this entry point if any global bindings are missing,
             // or their types are incompatible.
@@ -8129,7 +7894,7 @@ template <typename A>
                             NAMESPACE,
                             name
                         )?;
-                        self.put_inline_sampler_properties(back::Level(2), sampler, options)?;
+                        self.put_inline_sampler_properties(back::Level(2), sampler)?;
                         writeln!(self.out, "{});", back::INDENT)?;
                     } else if let crate::TypeInner::Image {
                         class: crate::ImageClass::External,
@@ -8286,8 +8051,6 @@ template <typename A>
                     mod_info,
                     pipeline_options,
                     force_loop_bounding: options.force_loop_bounding,
-                    emit_int_div_checks: options.emit_int_div_checks,
-                    ray_query_initialization_tracking: options.ray_query_initialization_tracking,
                 },
                 result_struct: if ep.stage == crate::ShaderStage::Task {
                     None

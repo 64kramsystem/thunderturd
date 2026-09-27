@@ -1,9 +1,7 @@
 use alloc::{borrow::Cow, string::String};
 use core::{fmt, mem};
 
-use macro_rules_attribute::derive;
-
-use crate::{link_to_wgc_docs, link_to_wgpu_docs, Backend, Backends, ConstDefault};
+use crate::{link_to_wgc_docs, link_to_wgpu_docs, Backend, Backends};
 
 #[cfg(any(feature = "serde", test))]
 use serde::{Deserialize, Serialize};
@@ -17,11 +15,11 @@ use crate::{Features, TextureUsages};
 /// https://gpuweb.github.io/gpuweb/#feature-level-string).
 ///
 /// `wgpu` does not support compatibility-level adapters per se.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, ConstDefault!)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 pub enum FeatureLevel {
-    #[custom(default)]
+    #[default]
     /// The `core` capability set
     Core,
     /// The `compatibility` capability set
@@ -74,11 +72,11 @@ impl<S> Default for RequestAdapterOptions<S> {
 /// Corresponds to [WebGPU `GPUPowerPreference`](
 /// https://gpuweb.github.io/gpuweb/#enumdef-gpupowerpreference).
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, ConstDefault!)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 pub enum PowerPreference {
-    #[custom(default)]
+    #[default]
     /// Power usage is not considered when choosing an adapter.
     None = 0,
     /// Adapter that uses the least possible power. This is often an integrated GPU.
@@ -211,9 +209,8 @@ pub struct AdapterInfo {
     /// - WARP: 4 or 128
     /// - lavapipe: 8
     pub subgroup_max_size: u32,
-    /// Whether adding [`TextureUsages::TRANSIENT_ATTACHMENT`] to a texture will decrease memory usage.
-    /// This is None on web, which means it is unknown from the adapter.
-    pub transient_saves_memory: Option<bool>,
+    /// If true, adding [`TextureUsages::TRANSIENT`] to a texture will decrease memory usage.
+    pub transient_saves_memory: bool,
 
     /// If limit bucketing was requested, contains the name of the applied
     /// bucket and the original capabilities of the adapter.
@@ -236,7 +233,7 @@ impl AdapterInfo {
             backend,
             subgroup_min_size: crate::MINIMUM_SUBGROUP_MIN_SIZE,
             subgroup_max_size: crate::MAXIMUM_SUBGROUP_MAX_SIZE,
-            transient_saves_memory: None,
+            transient_saves_memory: false,
             limit_bucket: None,
         }
     }

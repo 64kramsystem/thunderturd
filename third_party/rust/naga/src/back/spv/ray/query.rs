@@ -429,7 +429,7 @@ impl Writer {
         ));
         function.consume(
             not_none_block,
-            Instruction::branch_conditional(tri_comp_id, tri_label_id, merge_label_id),
+            Instruction::branch_conditional(not_none_comp_id, tri_label_id, merge_label_id),
         );
 
         let barycentrics_id = self.id_gen.next();
@@ -691,33 +691,12 @@ impl Writer {
                 RayQueryPoint::INITIALIZED.bits(),
             );
 
-            // Unlike in HLSL, in SPIR-V proceed is only guaranteed to return false once,
-            // after that it is UB to call. Therefore, don't call proceed if we have
-            // already finished as this will appear to have the same behaviour (after the
-            // first call that returns false, all subsequent ones will also return false)
-            let finished_proceed_id = write_ray_flags_contains_flags(
-                self,
-                &mut block,
-                initialized_tracker_id,
-                RayQueryPoint::FINISHED_TRAVERSAL.bits(),
-            );
-
-            let not_finished_id = self.id_gen.next();
-            block.body.push(Instruction::unary(
-                spirv::Op::LogicalNot,
-                bool_type_id,
-                not_finished_id,
-                finished_proceed_id,
-            ));
-
-            let is_valid_id = self.write_logical_and(&mut block, not_finished_id, is_initialized);
-
             block.body.push(Instruction::selection_merge(
                 merge_id,
                 spirv::SelectionControl::NONE,
             ));
 
-            Instruction::branch_conditional(is_valid_id, valid_block_id, merge_id)
+            Instruction::branch_conditional(is_initialized, valid_block_id, merge_id)
         } else {
             Instruction::branch(valid_block_id)
         };
@@ -1488,7 +1467,7 @@ impl Writer {
         function.to_words(&mut self.logical_layout.function_definitions);
 
         self.ray_query_functions
-            .insert(LookupRayQueryFunction::Terminate, func_id);
+            .insert(LookupRayQueryFunction::Proceed, func_id);
         func_id
     }
 }
@@ -1583,21 +1562,6 @@ impl BlockContext<'_> {
                     func_id,
                     &[query_id, tracker_ids.initialized_tracker],
                 ));
-            }
-            crate::RayQueryFunction::Begin => {
-                // Reset the ray query initialization tracker to zero as this is equivalent to it being a new variable.
-                // If initialization tracking is disabled, then the previous state doesn't matter as it is UB.
-                if self.writer.ray_query_initialization_tracking {
-                    let zero_value = self
-                        .writer
-                        .get_constant_scalar(crate::Literal::U32(RayQueryPoint::empty().bits()));
-
-                    block.body.push(Instruction::store(
-                        tracker_ids.initialized_tracker,
-                        zero_value,
-                        None,
-                    ));
-                }
             }
         }
     }

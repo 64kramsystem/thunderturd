@@ -3,12 +3,12 @@ use winnow::stream::FindSlice as _;
 use winnow::stream::Offset as _;
 use winnow::stream::Stream as _;
 
+use crate::decoder::StringBuilder;
 use crate::ErrorSink;
 use crate::Expected;
 use crate::ParseError;
 use crate::Raw;
 use crate::Span;
-use crate::decoder::StringBuilder;
 
 const ALLOCATION_ERROR: &str = "could not allocate for string";
 
@@ -99,10 +99,6 @@ pub(crate) fn decode_unquoted_scalar<'i>(
     let Some(first) = s.as_bytes().first() else {
         return decode_invalid(raw, output, error);
     };
-    if !first.is_ascii_digit() && s.contains(" ") {
-        // Only datetimes can have a space
-        return decode_invalid(raw, output, error);
-    }
     match first {
         // number starts
         b'+' | b'-' => {
@@ -118,11 +114,8 @@ pub(crate) fn decode_unquoted_scalar<'i>(
         b'.' => {
             let kind = ScalarKind::Float;
             let stream = raw.as_str();
-            if ensure_float(stream, raw, error) {
-                decode_float_or_integer(stream, raw, kind, output, error)
-            } else {
-                kind
-            }
+            ensure_float(stream, raw, error);
+            decode_float_or_integer(stream, raw, kind, output, error)
         }
         b't' | b'T' => {
             const SYMBOL: &str = "true";
@@ -152,31 +145,30 @@ pub(crate) fn decode_unquoted_scalar<'i>(
     }
 }
 
-fn decode_sign_prefix<'i>(
+pub(crate) fn decode_sign_prefix<'i>(
     raw: Raw<'i>,
     value: &'i str,
     output: &mut dyn StringBuilder<'i>,
     error: &mut dyn ErrorSink,
 ) -> ScalarKind {
-    let mut value = value;
-    let first = loop {
-        let Some(first) = value.as_bytes().first() else {
-            return decode_invalid(raw, output, error);
-        };
-        if !matches!(first, b'+' | b'-') {
-            break first;
-        }
-        let start = value.offset_from(&raw.as_str());
-        let end = start + 1;
-        error.report_error(
-            ParseError::new("redundant numeric sign")
-                .with_context(Span::new_unchecked(0, raw.len()))
-                .with_expected(&[])
-                .with_unexpected(Span::new_unchecked(start, end)),
-        );
-        value = &value[1..];
+    let Some(first) = value.as_bytes().first() else {
+        return decode_invalid(raw, output, error);
     };
     match first {
+        // number starts
+        b'+' | b'-' => {
+            let start = value.offset_from(&raw.as_str());
+            let end = start + 1;
+            error.report_error(
+                ParseError::new("redundant numeric sign")
+                    .with_context(Span::new_unchecked(0, raw.len()))
+                    .with_expected(&[])
+                    .with_unexpected(Span::new_unchecked(start, end)),
+            );
+
+            let value = &value[1..];
+            decode_sign_prefix(raw, value, output, error)
+        }
         // Report as if they were numbers because its most likely a typo
         b'_' => decode_datetime_or_float_or_integer(value, raw, output, error),
         // Date/number starts
@@ -186,11 +178,8 @@ fn decode_sign_prefix<'i>(
         b'.' => {
             let kind = ScalarKind::Float;
             let stream = raw.as_str();
-            if ensure_float(stream, raw, error) {
-                decode_float_or_integer(stream, raw, kind, output, error)
-            } else {
-                kind
-            }
+            ensure_float(stream, raw, error);
+            decode_float_or_integer(stream, raw, kind, output, error)
         }
         b'i' | b'I' => {
             const SYMBOL: &str = "inf";
@@ -232,7 +221,7 @@ fn decode_sign_prefix<'i>(
     }
 }
 
-fn decode_zero_prefix<'i>(
+pub(crate) fn decode_zero_prefix<'i>(
     value: &'i str,
     signed: bool,
     raw: Raw<'i>,
@@ -248,10 +237,6 @@ fn decode_zero_prefix<'i>(
         let radix = value.as_bytes()[1];
         match radix {
             b'x' | b'X' => {
-                if value.contains(" ") {
-                    // Only datetimes can have a space
-                    return decode_invalid(raw, output, error);
-                }
                 if signed {
                     error.report_error(
                         ParseError::new("integers with a radix cannot be signed")
@@ -273,17 +258,10 @@ fn decode_zero_prefix<'i>(
                 let radix = IntegerRadix::Hex;
                 let kind = ScalarKind::Integer(radix);
                 let stream = &value[2..];
-                if ensure_radixed_value(stream, raw, radix, error) {
-                    decode_float_or_integer(stream, raw, kind, output, error)
-                } else {
-                    kind
-                }
+                ensure_radixed_value(stream, raw, radix, error);
+                decode_float_or_integer(stream, raw, kind, output, error)
             }
             b'o' | b'O' => {
-                if value.contains(" ") {
-                    // Only datetimes can have a space
-                    return decode_invalid(raw, output, error);
-                }
                 if signed {
                     error.report_error(
                         ParseError::new("integers with a radix cannot be signed")
@@ -305,17 +283,10 @@ fn decode_zero_prefix<'i>(
                 let radix = IntegerRadix::Oct;
                 let kind = ScalarKind::Integer(radix);
                 let stream = &value[2..];
-                if ensure_radixed_value(stream, raw, radix, error) {
-                    decode_float_or_integer(stream, raw, kind, output, error)
-                } else {
-                    kind
-                }
+                ensure_radixed_value(stream, raw, radix, error);
+                decode_float_or_integer(stream, raw, kind, output, error)
             }
             b'b' | b'B' => {
-                if value.contains(" ") {
-                    // Only datetimes can have a space
-                    return decode_invalid(raw, output, error);
-                }
                 if signed {
                     error.report_error(
                         ParseError::new("integers with a radix cannot be signed")
@@ -337,17 +308,10 @@ fn decode_zero_prefix<'i>(
                 let radix = IntegerRadix::Bin;
                 let kind = ScalarKind::Integer(radix);
                 let stream = &value[2..];
-                if ensure_radixed_value(stream, raw, radix, error) {
-                    decode_float_or_integer(stream, raw, kind, output, error)
-                } else {
-                    kind
-                }
+                ensure_radixed_value(stream, raw, radix, error);
+                decode_float_or_integer(stream, raw, kind, output, error)
             }
             b'd' | b'D' => {
-                if value.contains(" ") {
-                    // Only datetimes can have a space
-                    return decode_invalid(raw, output, error);
-                }
                 if signed {
                     error.report_error(
                         ParseError::new("integers with a radix cannot be signed")
@@ -365,18 +329,15 @@ fn decode_zero_prefix<'i>(
                         .with_expected(&[])
                         .with_unexpected(Span::new_unchecked(0, 2)),
                 );
-                if ensure_radixed_value(stream, raw, radix, error) {
-                    decode_float_or_integer(stream, raw, kind, output, error)
-                } else {
-                    kind
-                }
+                ensure_radixed_value(stream, raw, radix, error);
+                decode_float_or_integer(stream, raw, kind, output, error)
             }
             _ => decode_datetime_or_float_or_integer(value, raw, output, error),
         }
     }
 }
 
-fn decode_datetime_or_float_or_integer<'i>(
+pub(crate) fn decode_datetime_or_float_or_integer<'i>(
     value: &'i str,
     raw: Raw<'i>,
     output: &mut dyn StringBuilder<'i>,
@@ -388,11 +349,8 @@ fn decode_datetime_or_float_or_integer<'i>(
     else {
         let kind = ScalarKind::Integer(IntegerRadix::Dec);
         let stream = raw.as_str();
-        if ensure_no_leading_zero(value, raw, error) {
-            return decode_float_or_integer(stream, raw, kind, output, error);
-        } else {
-            return kind;
-        }
+        ensure_no_leading_zero(value, raw, error);
+        return decode_float_or_integer(stream, raw, kind, output, error);
     };
 
     #[cfg(feature = "unsafe")] // SAFETY: ascii digits ensures UTF-8 boundary
@@ -407,27 +365,19 @@ fn decode_datetime_or_float_or_integer<'i>(
     } else if is_float(rest) {
         let kind = ScalarKind::Float;
         let stream = raw.as_str();
-        if ensure_float(value, raw, error) {
-            decode_float_or_integer(stream, raw, kind, output, error)
-        } else {
-            kind
-        }
+        ensure_float(value, raw, error);
+        decode_float_or_integer(stream, raw, kind, output, error)
     } else if rest.starts_with("_") {
         let kind = ScalarKind::Integer(IntegerRadix::Dec);
         let stream = raw.as_str();
-        if ensure_no_leading_zero(value, raw, error) {
-            decode_float_or_integer(stream, raw, kind, output, error)
-        } else {
-            kind
-        }
+        ensure_no_leading_zero(value, raw, error);
+        decode_float_or_integer(stream, raw, kind, output, error)
     } else {
         decode_invalid(raw, output, error)
     }
 }
 
 /// ```abnf
-/// ;; Float
-///
 /// float = float-int-part ( exp / frac [ exp ] )
 ///
 /// float-int-part = dec-int
@@ -438,15 +388,12 @@ fn decode_datetime_or_float_or_integer<'i>(
 /// exp = "e" float-exp-part
 /// float-exp-part = [ minus / plus ] zero-prefixable-int
 /// ```
-#[must_use]
-fn ensure_float<'i>(mut value: &'i str, raw: Raw<'i>, error: &mut dyn ErrorSink) -> bool {
-    let mut is_valid = true;
-
-    is_valid &= ensure_dec_uint(&mut value, raw, false, "invalid mantissa", error);
+pub(crate) fn ensure_float<'i>(mut value: &'i str, raw: Raw<'i>, error: &mut dyn ErrorSink) {
+    ensure_dec_uint(&mut value, raw, false, "invalid mantissa", error);
 
     if value.starts_with(".") {
         let _ = value.next_token();
-        is_valid &= ensure_dec_uint(&mut value, raw, true, "invalid fraction", error);
+        ensure_dec_uint(&mut value, raw, true, "invalid fraction", error);
     }
 
     if value.starts_with(['e', 'E']) {
@@ -454,7 +401,7 @@ fn ensure_float<'i>(mut value: &'i str, raw: Raw<'i>, error: &mut dyn ErrorSink)
         if value.starts_with(['+', '-']) {
             let _ = value.next_token();
         }
-        is_valid &= ensure_dec_uint(&mut value, raw, true, "invalid exponent", error);
+        ensure_dec_uint(&mut value, raw, true, "invalid exponent", error);
     }
 
     if !value.is_empty() {
@@ -466,22 +413,16 @@ fn ensure_float<'i>(mut value: &'i str, raw: Raw<'i>, error: &mut dyn ErrorSink)
                 .with_expected(&[])
                 .with_unexpected(Span::new_unchecked(start, end)),
         );
-        is_valid = false;
     }
-
-    is_valid
 }
 
-#[must_use]
-fn ensure_dec_uint<'i>(
+pub(crate) fn ensure_dec_uint<'i>(
     value: &mut &'i str,
     raw: Raw<'i>,
     zero_prefix: bool,
     invalid_description: &'static str,
     error: &mut dyn ErrorSink,
-) -> bool {
-    let mut is_valid = true;
-
+) {
     let start = *value;
     let mut digit_count = 0;
     while let Some(current) = value.chars().next() {
@@ -504,7 +445,6 @@ fn ensure_dec_uint<'i>(
                     .with_expected(&[Expected::Description("digits")])
                     .with_unexpected(Span::new_unchecked(start, end)),
             );
-            is_valid = false;
         }
         1 => {}
         _ if start.starts_with("0") && !zero_prefix => {
@@ -516,18 +456,12 @@ fn ensure_dec_uint<'i>(
                     .with_expected(&[])
                     .with_unexpected(Span::new_unchecked(start, end)),
             );
-            is_valid = false;
         }
         _ => {}
     }
-
-    is_valid
 }
 
-#[must_use]
-fn ensure_no_leading_zero<'i>(value: &'i str, raw: Raw<'i>, error: &mut dyn ErrorSink) -> bool {
-    let mut is_valid = true;
-
+pub(crate) fn ensure_no_leading_zero<'i>(value: &'i str, raw: Raw<'i>, error: &mut dyn ErrorSink) {
     if value.starts_with("0") {
         let start = value.offset_from(&raw.as_str());
         let end = start + 1;
@@ -537,21 +471,15 @@ fn ensure_no_leading_zero<'i>(value: &'i str, raw: Raw<'i>, error: &mut dyn Erro
                 .with_expected(&[])
                 .with_unexpected(Span::new_unchecked(start, end)),
         );
-        is_valid = false;
     }
-
-    is_valid
 }
 
-#[must_use]
-fn ensure_radixed_value(
+pub(crate) fn ensure_radixed_value(
     value: &str,
     raw: Raw<'_>,
     radix: IntegerRadix,
     error: &mut dyn ErrorSink,
-) -> bool {
-    let mut is_valid = true;
-
+) {
     let invalid = ['+', '-'];
     let value = if let Some(value) = value.strip_prefix(invalid) {
         let pos = raw.as_str().find(invalid).unwrap();
@@ -561,7 +489,6 @@ fn ensure_radixed_value(
                 .with_expected(&[])
                 .with_unexpected(Span::new_unchecked(pos, pos + 1)),
         );
-        is_valid = false;
         value
     } else {
         value
@@ -576,15 +503,12 @@ fn ensure_radixed_value(
                     .with_context(Span::new_unchecked(0, raw.len()))
                     .with_unexpected(Span::new_unchecked(pos, pos)),
             );
-            is_valid = false;
         }
     }
-
-    is_valid
 }
 
-fn decode_float_or_integer<'i>(
-    mut stream: &'i str,
+pub(crate) fn decode_float_or_integer<'i>(
+    stream: &'i str,
     raw: Raw<'i>,
     kind: ScalarKind,
     output: &mut dyn StringBuilder<'i>,
@@ -594,55 +518,79 @@ fn decode_float_or_integer<'i>(
 
     let underscore = "_";
 
-    let stream_start = stream.offset_from(&raw.as_str());
-    while !stream.is_empty() {
-        let sep_pos = stream.find_slice(underscore);
-        let sep_start = sep_pos
-            .clone()
-            .map(|r| r.start)
-            .unwrap_or_else(|| stream.len());
+    if has_underscore(stream) {
+        if stream.starts_with(underscore) {
+            error.report_error(
+                ParseError::new("`_` may only go between digits")
+                    .with_context(Span::new_unchecked(0, raw.len()))
+                    .with_expected(&[])
+                    .with_unexpected(Span::new_unchecked(0, underscore.len())),
+            );
+        }
+        if 1 < stream.len() && stream.ends_with(underscore) {
+            let start = stream.offset_from(&raw.as_str());
+            let end = start + stream.len();
+            error.report_error(
+                ParseError::new("`_` may only go between digits")
+                    .with_context(Span::new_unchecked(0, raw.len()))
+                    .with_expected(&[])
+                    .with_unexpected(Span::new_unchecked(end - underscore.len(), end)),
+            );
+        }
 
-        let part_start = stream.offset_from(&raw.as_str());
-        let part_end = part_start + sep_start;
-        let part = stream.next_slice(sep_start);
+        for part in stream.split(underscore) {
+            let part_start = part.offset_from(&raw.as_str());
+            let part_end = part_start + part.len();
 
-        if sep_pos.is_some() {
-            let _ = stream.next_slice(underscore.len());
-
-            let mut is_invalid_sep = false;
-            if let Some(last_pos) = sep_start.checked_sub(1) {
-                let last_byte = raw.as_bytes()[part_start + last_pos];
-                if !is_any_digit(last_byte, kind) {
-                    is_invalid_sep = true;
+            if 0 < part_start {
+                let first = part.as_bytes().first().copied().unwrap_or(b'0');
+                if !is_any_digit(first, kind) {
+                    let start = part_start - 1;
+                    let end = part_start;
+                    debug_assert_eq!(&raw.as_str()[start..end], underscore);
+                    error.report_error(
+                        ParseError::new("`_` may only go between digits")
+                            .with_context(Span::new_unchecked(0, raw.len()))
+                            .with_unexpected(Span::new_unchecked(start, end)),
+                    );
                 }
-            } else if part_start == stream_start {
-                is_invalid_sep = true;
+            }
+            if 1 < part.len() && part_end < raw.len() {
+                let last = part.as_bytes().last().copied().unwrap_or(b'0');
+                if !is_any_digit(last, kind) {
+                    let start = part_end;
+                    let end = start + underscore.len();
+                    debug_assert_eq!(&raw.as_str()[start..end], underscore);
+                    error.report_error(
+                        ParseError::new("`_` may only go between digits")
+                            .with_context(Span::new_unchecked(0, raw.len()))
+                            .with_unexpected(Span::new_unchecked(start, end)),
+                    );
+                }
             }
 
-            if let Some(next_byte) = stream.as_bytes().first() {
-                if !is_any_digit(*next_byte, kind) {
-                    is_invalid_sep = true;
-                }
-            } else if stream.is_empty() {
-                is_invalid_sep = true;
-            }
-
-            if is_invalid_sep {
-                let start = part_end;
-                let end = start + underscore.len();
+            if part.is_empty() && part_start != 0 && part_end != raw.len() {
+                let start = part_start;
+                let end = start + 1;
                 error.report_error(
                     ParseError::new("`_` may only go between digits")
                         .with_context(Span::new_unchecked(0, raw.len()))
-                        .with_expected(&[])
-                        .with_unexpected(Span::new_unchecked(end - underscore.len(), end)),
+                        .with_unexpected(Span::new_unchecked(start, end)),
+                );
+            }
+
+            if !part.is_empty() && !output.push_str(part) {
+                error.report_error(
+                    ParseError::new(ALLOCATION_ERROR)
+                        .with_unexpected(Span::new_unchecked(part_start, part_end)),
                 );
             }
         }
-
-        if !part.is_empty() && !output.push_str(part) {
+    } else {
+        if !output.push_str(stream) {
             error.report_error(
                 ParseError::new(ALLOCATION_ERROR)
-                    .with_unexpected(Span::new_unchecked(part_start, part_end)),
+                    .with_unexpected(Span::new_unchecked(0, raw.len())),
             );
         }
     }
@@ -666,11 +614,15 @@ fn is_dec_integer_digit(b: u8) -> bool {
     (b'0'..=b'9').contains_token(b)
 }
 
+fn has_underscore(raw: &str) -> bool {
+    raw.as_bytes().find_slice(b'_').is_some()
+}
+
 fn is_float(raw: &str) -> bool {
     raw.as_bytes().find_slice((b'.', b'e', b'E')).is_some()
 }
 
-fn decode_as_is<'i>(
+pub(crate) fn decode_as_is<'i>(
     raw: Raw<'i>,
     kind: ScalarKind,
     output: &mut dyn StringBuilder<'i>,
@@ -680,7 +632,7 @@ fn decode_as_is<'i>(
     kind
 }
 
-fn decode_as<'i>(
+pub(crate) fn decode_as<'i>(
     raw: Raw<'i>,
     symbol: &'i str,
     kind: ScalarKind,
@@ -696,7 +648,7 @@ fn decode_as<'i>(
     kind
 }
 
-fn decode_symbol<'i>(
+pub(crate) fn decode_symbol<'i>(
     raw: Raw<'i>,
     symbol: &'static str,
     kind: ScalarKind,
@@ -720,7 +672,7 @@ fn decode_symbol<'i>(
     decode_as(raw, symbol, kind, output, error)
 }
 
-fn decode_invalid<'i>(
+pub(crate) fn decode_invalid<'i>(
     raw: Raw<'i>,
     output: &mut dyn StringBuilder<'i>,
     error: &mut dyn ErrorSink,
@@ -770,28 +722,4 @@ fn decode_invalid<'i>(
         );
     }
     ScalarKind::String
-}
-
-#[cfg(test)]
-#[cfg(feature = "std")]
-mod test {
-    use super::*;
-    use alloc::borrow::Cow;
-
-    #[test]
-    fn many_redundant_signs() {
-        // Regression test: decode_sign_prefix previously recursed once per sign
-        // character, causing a stack overflow on long runs.
-        let signs = "-".repeat(5_000);
-        let input = format!("{signs}1");
-
-        let mut error = Vec::new();
-        let mut output = Cow::Borrowed("");
-        decode_unquoted_scalar(
-            Raw::new_unchecked(&input, None, Default::default()),
-            &mut output,
-            &mut error,
-        );
-        assert!(!error.is_empty());
-    }
 }

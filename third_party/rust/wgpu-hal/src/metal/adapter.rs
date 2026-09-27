@@ -10,7 +10,7 @@ use objc2_metal::{
 use wgt::{AstcBlock, AstcChannel};
 
 use alloc::{string::ToString as _, sync::Arc, vec::Vec};
-use wgpu_sync::{atomic, Mutex, OnceCell};
+use core::sync::atomic;
 
 use crate::metal::QueueShared;
 
@@ -45,11 +45,22 @@ fn device_class_responds_to(device: &ProtocolObject<dyn MTLDevice>, sel: Sel) ->
 /// [new command buffer]: https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbuffer()?language=objc
 pub(super) const MAX_COMMAND_BUFFERS: usize = 4096;
 
-/// "Maximum number of entries in the buffer argument table, per graphics or kernel function"
-///
-/// Vertex buffers are placed at the end of the table (highest indices),
-/// counting down from MAX_BUFFERS - 1.
-pub const MAX_BUFFERS: u32 = 31;
+// Metal has a single buffer limit that we must split across 3 WebGPU limits:
+// The Metal limit is: 31 "Maximum number of entries in the buffer argument table, per graphics or kernel function".
+// We must split it across:
+//  - maxStorageBuffersPerShaderStage; must be at least 8
+//  - maxUniformBuffersPerShaderStage; must be at least 12
+//  - maxVertexBuffers; must be at least 8
+// We require 2 additional internal buffers:
+//  - one for immediate data
+//  - one for sizes of other buffers
+// We use the last buffer for an acceleration structure.
+const MAX_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 8;
+const MAX_UNIFORM_BUFFERS_PER_SHADER_STAGE: u32 = 12;
+const MAX_VERTEX_BUFFERS: u32 = 8;
+const MAX_ACCELERATION_STRUCTURES_PER_SHADER_STAGE: u32 = 1;
+// Use the end of the range for vertex buffers.
+pub const VERTEX_BUFFER_SLOT_START: u32 = 31 - 8;
 
 impl super::Adapter {
     pub(super) fn new(shared: Arc<super::AdapterShared>) -> Self {
@@ -113,9 +124,6 @@ impl crate::Adapter for super::Adapter {
                     shared: Arc::new(QueueShared {
                         raw: queue,
                         command_buffer_created_not_submitted: atomic::AtomicUsize::new(0),
-                        pending_waits: Mutex::new(Vec::new()),
-                        pending_signals: Mutex::new(Vec::new()),
-                        relay: OnceCell::new(),
                     }),
                     timestamp_period,
                 },
@@ -397,52 +405,17 @@ impl crate::Adapter for super::Adapter {
         &self,
         surface: &super::Surface,
     ) -> Option<crate::SurfaceCapabilities> {
-        // `CAMetalLayer` color-matches layer contents to whatever display the
-        // window is on, with the compositor tone-mapping where needed, so
-        // Display-P3 and HDR (PQ/HLG) color spaces work regardless of the
-        // physical display's gamut and are not gated on it here.
-        let format_caps = |format: wgt::TextureFormat| {
-            let mut color_spaces =
-                wgt::SurfaceColorSpaces::SRGB | wgt::SurfaceColorSpaces::DISPLAY_P3;
-            if format == wgt::TextureFormat::Rgba16Float {
-                // `Rgba16Float` enables Metal's extended dynamic range, in both
-                // linear (scRGB) and encoded (extended nonlinear sRGB) form,
-                // for the BT.709 and Display-P3 gamuts.
-                color_spaces |= wgt::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR
-                    | wgt::SurfaceColorSpaces::EXTENDED_SRGB;
-                // `kCGColorSpaceExtendedDisplayP3` only exists on macOS 11.0+/
-                // iOS 14.0+, so gate it like the BT.2100 spaces below.
-                if available!(macos = 11.0, ios = 14.0, tvos = 14.0, visionos = 1.0) {
-                    color_spaces |= wgt::SurfaceColorSpaces::EXTENDED_DISPLAY_P3;
-                }
-            }
-            // PQ/HLG only on the >=10-bit formats: 8-bit PQ would result in unusable
-            // banding. The ITUR_2100 color space constants require
-            // macOS 11.0/iOS 14.0.
-            if matches!(
-                format,
-                wgt::TextureFormat::Rgba16Float | wgt::TextureFormat::Rgb10a2Unorm
-            ) && available!(macos = 11.0, ios = 14.0, tvos = 14.0, visionos = 1.0)
-            {
-                color_spaces |=
-                    wgt::SurfaceColorSpaces::BT2100_PQ | wgt::SurfaceColorSpaces::BT2100_HLG;
-            }
-            wgt::SurfaceFormatCapabilities {
-                format,
-                color_spaces,
-            }
-        };
         let mut formats = vec![
-            format_caps(wgt::TextureFormat::Bgra8Unorm),
-            format_caps(wgt::TextureFormat::Bgra8UnormSrgb),
-            format_caps(wgt::TextureFormat::Rgba16Float),
+            wgt::TextureFormat::Bgra8Unorm,
+            wgt::TextureFormat::Bgra8UnormSrgb,
+            wgt::TextureFormat::Rgba16Float,
         ];
         if self
             .shared
             .private_texture_format_caps
             .format_rgb10a2_unorm_all
         {
-            formats.push(format_caps(wgt::TextureFormat::Rgb10a2Unorm));
+            formats.push(wgt::TextureFormat::Rgb10a2Unorm);
         }
 
         Some(crate::SurfaceCapabilities {
@@ -469,7 +442,7 @@ impl crate::Adapter for super::Adapter {
             },
             composite_alpha_modes: vec![
                 wgt::CompositeAlphaMode::Opaque,
-                wgt::CompositeAlphaMode::PreMultiplied,
+                wgt::CompositeAlphaMode::PostMultiplied,
             ],
 
             current_extent: Some(surface.dimensions()),
@@ -480,13 +453,6 @@ impl crate::Adapter for super::Adapter {
                 | wgt::TextureUses::STORAGE_WRITE_ONLY
                 | wgt::TextureUses::STORAGE_READ_WRITE,
         })
-    }
-
-    unsafe fn surface_display_hdr_info(
-        &self,
-        surface: &super::Surface,
-    ) -> Option<wgt::DisplayHdrInfo> {
-        surface.display_hdr_info()
     }
 
     unsafe fn get_presentation_timestamp(&self) -> wgt::PresentationTimestamp {
@@ -503,8 +469,7 @@ impl crate::Adapter for super::Adapter {
     fn get_ordered_texture_usages(&self) -> wgt::TextureUses {
         wgt::TextureUses::INCLUSIVE
             | wgt::TextureUses::COLOR_TARGET
-            | wgt::TextureUses::DEPTH_WRITE
-            | wgt::TextureUses::STENCIL_WRITE
+            | wgt::TextureUses::DEPTH_STENCIL_WRITE
     }
 }
 
@@ -775,10 +740,7 @@ impl super::CapabilitiesQuery {
                 1
             },
             format_b5: os_type != super::OsType::Macos,
-            format_bc: os_type == super::OsType::Macos
-                || (available!(macos = 11.0, ios = 16.4, tvos = 16.4, visionos = 1.0)
-                    && device_class_responds_to(device, sel!(supportsBCTextureCompression))
-                    && device.supportsBCTextureCompression()),
+            format_bc: os_type == super::OsType::Macos,
             format_eac_etc: os_type != super::OsType::Macos
                 // M1 in macOS supports EAC/ETC2
                 || (family_check && device.supportsFamily(MTLGPUFamily::Apple7)),
@@ -1133,7 +1095,7 @@ impl super::CapabilitiesQuery {
             // https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf#page=4
             mesh_shaders,
             max_task_workgroup_count: if mesh_shaders
-                && (metal4 || device.supportsFamily(MTLGPUFamily::Apple7))
+                && (metal4 || device.supportsFamily(MTLGPUFamily::Apple2))
             {
                 u32::MAX
             } else if mesh_shaders {
@@ -1179,10 +1141,6 @@ impl super::CapabilitiesQuery {
                 tvos = 16.0,
                 visionos = 1.0
             ),
-            texture_component_swizzle: family_check
-                && (metal3
-                    || device.supportsFamily(MTLGPUFamily::Mac2)
-                    || device.supportsFamily(MTLGPUFamily::Apple2)),
         }
     }
 
@@ -1204,19 +1162,13 @@ impl super::CapabilitiesQuery {
             | F::PASSTHROUGH_SHADERS
             | F::EXTERNAL_TEXTURE;
 
-        features.set(F::TEXTURE_COMPONENT_SWIZZLE, self.texture_component_swizzle);
         features.set(F::FLOAT32_FILTERABLE, self.supports_float_filtering);
         features.set(F::FLOAT32_BLENDABLE, true);
         features.set(F::INDIRECT_FIRST_INSTANCE, self.indirect_draw_dispatch);
         features.set(
-            F::TIMESTAMP_QUERY,
+            F::TIMESTAMP_QUERY | F::TIMESTAMP_QUERY_INSIDE_ENCODERS,
             self.timestamp_query_support
                 .contains(TimestampQuerySupport::STAGE_BOUNDARIES),
-        );
-        features.set(
-            F::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-            self.timestamp_query_support
-                .contains(TimestampQuerySupport::ON_BLIT_ENCODER),
         );
         features.set(
             F::TIMESTAMP_QUERY_INSIDE_PASSES,
@@ -1245,14 +1197,6 @@ impl super::CapabilitiesQuery {
                 | F::PARTIALLY_BOUND_BINDING_ARRAY,
             self.msl_version >= MTLLanguageVersion::Version3_0
                 && self.supports_arrays_of_textures
-                && self
-                    .argument_buffers
-                    .unwrap_or(MTLArgumentBuffersTier::Tier1)
-                    >= MTLArgumentBuffersTier::Tier2,
-        );
-        features.set(
-            F::BUFFER_BINDING_ARRAY,
-            self.msl_version >= MTLLanguageVersion::Version2_0
                 && self
                     .argument_buffers
                     .unwrap_or(MTLArgumentBuffersTier::Tier1)
@@ -1338,7 +1282,7 @@ impl super::CapabilitiesQuery {
         features
     }
 
-    pub fn capabilities(&self, instance_flags: wgt::InstanceFlags) -> crate::Capabilities {
+    pub fn capabilities(&self) -> crate::Capabilities {
         let mut downlevel = wgt::DownlevelCapabilities::default();
         downlevel.flags.set(
             wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
@@ -1375,36 +1319,6 @@ impl super::CapabilitiesQuery {
             self.format_bc || (self.format_eac_etc && self.format_astc),
         );
 
-        let max_storage_buffers_per_shader_stage;
-        let max_uniform_buffers_per_shader_stage;
-        let max_vertex_buffers;
-        let max_acceleration_structures_per_shader_stage;
-        let max_buffers_and_acceleration_structures_per_shader_stage;
-
-        // Metal has a single buffer limit that we must split across 3 WebGPU limits:
-        //  - maxStorageBuffersPerShaderStage; must be at least 8
-        //  - maxUniformBuffersPerShaderStage; must be at least 12
-        //  - maxVertexBuffers; must be at least 8
-        // We also have to reserve 2 additional internal buffers:
-        //  - one for immediate data
-        //  - one for sizes of other buffers
-        if instance_flags.contains(wgt::InstanceFlags::STRICT_WEBGPU_COMPLIANCE) {
-            max_storage_buffers_per_shader_stage = 9;
-            max_uniform_buffers_per_shader_stage = 12;
-            max_vertex_buffers = 8;
-            max_acceleration_structures_per_shader_stage = 0;
-            max_buffers_and_acceleration_structures_per_shader_stage = u32::MAX;
-        } else {
-            const MAX_USABLE_BUFFERS: u32 = MAX_BUFFERS - 2;
-            max_storage_buffers_per_shader_stage = MAX_USABLE_BUFFERS;
-            max_uniform_buffers_per_shader_stage = MAX_USABLE_BUFFERS;
-            max_vertex_buffers = MAX_USABLE_BUFFERS;
-            max_acceleration_structures_per_shader_stage = MAX_USABLE_BUFFERS;
-            max_buffers_and_acceleration_structures_per_shader_stage = MAX_USABLE_BUFFERS;
-        }
-
-        let (max_sampled_textures_per_shader_stage, max_storage_textures_per_shader_stage) =
-            self.max_textures_per_stage;
         let limits = crate::auxil::adjust_raw_limits(wgt::Limits {
             //
             // WebGPU LIMITS:
@@ -1421,20 +1335,16 @@ impl super::CapabilitiesQuery {
             // No limit.
             max_bindings_per_bind_group: u32::MAX,
             // No limit, use maxUniformBuffersPerShaderStage.
-            max_dynamic_uniform_buffers_per_pipeline_layout: max_uniform_buffers_per_shader_stage,
+            max_dynamic_uniform_buffers_per_pipeline_layout: MAX_UNIFORM_BUFFERS_PER_SHADER_STAGE,
             // No limit, use maxStorageBuffersPerShaderStage.
-            max_dynamic_storage_buffers_per_pipeline_layout: max_storage_buffers_per_shader_stage,
+            max_dynamic_storage_buffers_per_pipeline_layout: MAX_STORAGE_BUFFERS_PER_SHADER_STAGE,
             // "Maximum number of entries in the sampler state argument table, per graphics or kernel function"
             max_samplers_per_shader_stage: 16,
-            max_sampled_textures_per_shader_stage,
-            max_storage_buffers_per_shader_stage,
-            max_storage_buffers_in_vertex_stage: 0,
-            max_storage_buffers_in_fragment_stage: 0,
-            max_storage_textures_per_shader_stage,
-            max_storage_textures_in_vertex_stage: 0,
-            max_storage_textures_in_fragment_stage: 0,
-            max_uniform_buffers_per_shader_stage,
-            max_vertex_buffers,
+            max_sampled_textures_per_shader_stage: self.max_textures_per_stage.0,
+            max_storage_textures_per_shader_stage: self.max_textures_per_stage.1,
+            max_storage_buffers_per_shader_stage: MAX_STORAGE_BUFFERS_PER_SHADER_STAGE,
+            max_uniform_buffers_per_shader_stage: MAX_UNIFORM_BUFFERS_PER_SHADER_STAGE,
+            max_vertex_buffers: MAX_VERTEX_BUFFERS,
             max_buffer_size: self.max_buffer_size,
             // No limit, use maxBufferSize.
             max_uniform_buffer_binding_size: self.max_buffer_size,
@@ -1476,8 +1386,8 @@ impl super::CapabilitiesQuery {
             // From 2.17.7 in https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
             // > [Acceleration structures] are opaque objects that can be bound directly using
             // buffer binding points or via argument buffers
-            max_acceleration_structures_per_shader_stage,
-            max_buffers_and_acceleration_structures_per_shader_stage,
+            max_acceleration_structures_per_shader_stage:
+                MAX_ACCELERATION_STRUCTURES_PER_SHADER_STAGE,
 
             max_multiview_view_count: if self.supported_vertex_amplification_factor > 1 {
                 self.supported_vertex_amplification_factor
@@ -1500,9 +1410,6 @@ impl super::CapabilitiesQuery {
             max_mesh_output_primitives: 256,
             max_mesh_output_layers: self.max_texture_layers as u32,
             max_mesh_multiview_view_count: 0,
-            // unimplemented
-            max_ray_dispatch_count: 0,
-            max_ray_recursion_depth: 0,
         });
 
         crate::Capabilities {
@@ -1519,10 +1426,6 @@ impl super::CapabilitiesQuery {
                 >())
                 .unwrap(),
                 ray_tracing_scratch_buffer_alignment: 1,
-                // Not yet supported
-                ray_tracing_pipeline_group_data_size: 0,
-                ray_tracing_pipeline_group_data_alignment: 0,
-                ray_tracing_pipeline_data_offset_alignment: 0,
             },
             downlevel,
             cooperative_matrix_properties: self.cooperative_matrix_properties(),
@@ -1577,7 +1480,6 @@ impl super::CapabilitiesQuery {
             timestamp_query_support: self.timestamp_query_support,
             supports_memoryless_storage: self.supports_memoryless_storage,
             mesh_shaders: self.mesh_shaders,
-            texture_component_swizzle: self.texture_component_swizzle,
         }
     }
 

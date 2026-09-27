@@ -1,6 +1,6 @@
 use alloc::{borrow::Cow, string::String};
 
-use wgpu_sync::Mutex;
+use parking_lot::Mutex;
 use windows::Win32::{Foundation, System::Diagnostics::Debug};
 
 // This is a mutex as opposed to an atomic as we need to completely

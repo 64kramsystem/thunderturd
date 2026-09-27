@@ -5,24 +5,12 @@
 #}
 
 {%- macro to_ffi_call(func) -%}
-    {%- call is_try(func) %}{% endcall -%}
+    {%- call is_try(func) -%}
     {%- if let(Some(e)) = func.throws_type() -%}
         rustCallWithError({{ e|ffi_error_converter_name }}_lift) {
     {%- else -%}
         rustCall() {
     {%- endif %}
-    {#- Always name the `RustCallStatus` pointer so the same form works
-        whether or not we're nested inside `withUnsafeBytes` closures for
-        `&[u8]` args. #}
-        uniffiCallStatus in
-    {#- Open nested `FfiConverterByRefBytes.lower` scopes for any `&[u8]`
-        args. The `ForeignBytes` value is only guaranteed valid inside the
-        scope, so the full FFI call runs inside the innermost closure. #}
-    {%- for arg in func.arguments() -%}
-    {%-     if arg|is_borrowed_bytes %}
-        FfiConverterByRefBytes.lower({{ arg.name()|var_name }}) { {{ arg.name()|var_name }}Fb in
-    {%-     endif %}
-    {%- endfor %}
     {{ func.ffi_func().name() }}(
         {%- match func.self_type() %}
         {%-     when Some(Type::Object { .. }) %}
@@ -31,38 +19,31 @@
             {{ t|lower_fn }}(self),
         {%-     when None %}
         {%- endmatch %}
-        {%- call arg_list_lowered(func) %}{% endcall -%}
-         uniffiCallStatus
+        {%- call arg_list_lowered(func) -%} $0
     )
-    {#- Close nested `withUnsafeBytes` closures. #}
-    {%- for arg in func.arguments() -%}
-    {%-     if arg|is_borrowed_bytes %}
-        }
-    {%-     endif %}
-    {%- endfor %}
 }
 {%- endmacro -%}
 
 // eg, `public func foo_bar() { body }`
 {%- macro func_decl(func_decl, callable, indent) %}
-{%- call docstring(callable, indent) %}{% endcall %}
+{%- call docstring(callable, indent) %}
 {{ func_decl }} {{ callable.name()|fn_name }}(
-    {%- call arg_list_decl(callable) %}{% endcall -%})
-    {%- call is_async(callable) %}{% endcall %}
-    {%- call throws(callable) %}{% endcall %}
+    {%- call arg_list_decl(callable) -%})
+    {%- call is_async(callable) %}
+    {%- call throws(callable) %}
     {%- if let Some(return_type) = callable.return_type() %} -> {{ return_type|type_name }} {%- endif %}  {
-    {%- call call_body(callable) %}{% endcall %}
+    {%- call call_body(callable) %}
 }
 {%- endmacro %}
 
 // primary ctor - no name, no return-type.
 {%- macro ctor_decl(callable, indent) %}
-{%- call docstring(callable, indent) %}{% endcall %}
+{%- call docstring(callable, indent) %}
 public convenience init(
-    {%- call arg_list_decl(callable) %}{% endcall -%}) {%- call is_async(callable) %}{% endcall %} {%- call throws(callable) %}{% endcall %} {
+    {%- call arg_list_decl(callable) -%}) {%- call is_async(callable) %} {%- call throws(callable) %} {
     {%- if callable.is_async() %}
     let handle =
-        {%- call call_async(callable) %}{% endcall %}
+        {%- call call_async(callable) %}
         {# The async mechanism returns an already constructed self.
            We work around that by cloning the handle from that object, then
            assume the old object dies as there are no other references possible.
@@ -70,7 +51,7 @@ public convenience init(
         .uniffiCloneHandle()
     {%- else %}
     let handle =
-        {% call to_ffi_call(callable) %}{% endcall %}
+        {% call to_ffi_call(callable) %}
     {%- endif %}
     self.init(unsafeFromHandle: handle)
 }
@@ -78,29 +59,25 @@ public convenience init(
 
 {%- macro call_body(callable) %}
 {%- if callable.is_async() %}
-    return {%- call call_async(callable) %}{% endcall %}
+    return {%- call call_async(callable) %}
 {%- else %}
 {%-     match callable.return_type() -%}
 {%-         when Some(return_type) %}
-    return {% call is_try(callable) %}{% endcall %} {{ return_type|lift_fn }}({% call to_ffi_call(callable) %}{% endcall %})
+    return {% call is_try(callable) %} {{ return_type|lift_fn }}({% call to_ffi_call(callable) %})
 {%-         when None %}
-{%-             call to_ffi_call(callable) %}{% endcall %}
+{%-             call to_ffi_call(callable) %}
 {%-     endmatch %}
 {%- endif %}
 
 {%- endmacro %}
 
 {%- macro call_async(callable) %}
-        {% call is_try(callable) %}{% endcall %} await uniffiRustCallAsync(
+        {% call is_try(callable) %} await uniffiRustCallAsync(
             rustFutureFunc: {
                 {{ callable.ffi_func().name() }}(
-                    {%- match callable.self_type() %}
-                    {%-     when Some(Type::Object { .. }) %}
-                        self.uniffiCloneHandle(){% if !callable.arguments().is_empty() %},{% endif %}
-                    {%-     when Some(t) %}
-                        {{ t|lower_fn }}(self){% if !callable.arguments().is_empty() %},{% endif %}
-                    {%-     when None %}
-                    {%- endmatch %}
+                    {%- if callable.self_type().is_some() %}
+                    self.uniffiCloneHandle(){% if !callable.arguments().is_empty() %},{% endif %}
+                    {% endif %}
                     {%- for arg in callable.arguments() -%}
                     {{ arg|lower_fn }}({{ arg.name()|var_name }}){% if !loop.last %},{% endif %}
                     {%- endfor %}
@@ -126,7 +103,7 @@ public convenience init(
 
 {%- macro arg_list_lowered(func) %}
     {%- for arg in func.arguments() %}
-        {{ arg|arg_expr }},
+        {{ arg|lower_fn }}({{ arg.name()|var_name }}),
     {%- endfor %}
 {%- endmacro -%}
 
@@ -152,7 +129,7 @@ public convenience init(
 -#}
 {% macro field_list_decl(item, has_nameless_fields) %}
     {%- for field in item.fields() -%}
-        {%- call docstring(field, 8) %}{% endcall %}
+        {%- call docstring(field, 8) %}
         {%- if has_nameless_fields %}
         {{- field|type_name -}}
         {%- if !loop.last -%}, {%- endif -%}
@@ -203,7 +180,7 @@ v{{- field_num -}}
 {%- endmacro %}
 
 {%- macro docstring(defn, indent_spaces) %}
-{%- call docstring_value(defn.docstring(), indent_spaces) %}{% endcall %}
+{%- call docstring_value(defn.docstring(), indent_spaces) %}
 {%- endmacro %}
 
 // macro for uniffi_trait implementations.
@@ -211,32 +188,32 @@ v{{- field_num -}}
 {%- if let Some(fmt) = uniffi_trait_methods.debug_fmt %}
 // The local Rust `Debug` implementation.
 public var debugDescription: String {
-    return {% call is_try(fmt) %}{% endcall %} {{ fmt.return_type().unwrap()|lift_fn }}(
-        {% call to_ffi_call(fmt) %}{% endcall %}
+    return {% call is_try(fmt) %} {{ fmt.return_type().unwrap()|lift_fn }}(
+        {% call to_ffi_call(fmt) %}
     )
 }
 {%- endif %}
 {%- if let Some(fmt) = uniffi_trait_methods.display_fmt %}
 // The local Rust `Display` implementation.
 public var description: String {
-    return {% call is_try(fmt) %}{% endcall %} {{ fmt.return_type().unwrap()|lift_fn }}(
-        {% call to_ffi_call(fmt) %}{% endcall %}
+    return {% call is_try(fmt) %} {{ fmt.return_type().unwrap()|lift_fn }}(
+        {% call to_ffi_call(fmt) %}
     )
 }
 {%- endif %}
 {%- if let Some(eq) = uniffi_trait_methods.eq_eq %}
 // The local Rust `Eq` implementation - only `eq` is used.
 public static func == (self: {{ eq.object_name() | class_name }}, other: {{ eq.object_name() | class_name }}) -> Bool {
-    return {% call is_try(eq) %}{% endcall %} {{ eq.return_type().unwrap()|lift_fn }}(
-        {% call to_ffi_call(eq) %}{% endcall %}
+    return {% call is_try(eq) %} {{ eq.return_type().unwrap()|lift_fn }}(
+        {% call to_ffi_call(eq) %}
     )
 }
 {%- endif %}
 {%- if let Some(hash) = uniffi_trait_methods.hash_hash %}
 // The local Rust `Hash` implementation
 public func hash(into hasher: inout Hasher) {
-    let val = {% call is_try(hash) %}{% endcall %} {{ hash.return_type().unwrap()|lift_fn }}(
-        {% call to_ffi_call(hash) %}{% endcall %}
+    let val = {% call is_try(hash) %} {{ hash.return_type().unwrap()|lift_fn }}(
+        {% call to_ffi_call(hash) %}
     )
     hasher.combine(val)
 }
@@ -244,8 +221,8 @@ public func hash(into hasher: inout Hasher) {
 {%- if let Some(cmp) = uniffi_trait_methods.ord_cmp %}
 // The local Rust `Ord` implementation
 public static func < (self: {{ cmp.object_name() | class_name }}, other: {{ cmp.object_name() | class_name }}) -> Bool {
-    return {% call is_try(cmp) %}{% endcall %} {{ cmp.return_type().unwrap()|lift_fn }}(
-        {% call to_ffi_call(cmp) %}{% endcall %}
+    return {% call is_try(cmp) %} {{ cmp.return_type().unwrap()|lift_fn }}(
+        {% call to_ffi_call(cmp) %}
     ) < 0
 }
 {%- endif %}

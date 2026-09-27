@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use neqo_common::{Buffer, Decoder, Encoder, Role, expect_usize, qinfo, qtrace};
+use neqo_common::{Buffer, Decoder, Encoder, Role, qinfo, qtrace};
 use nss::{
     constants::{TLS_AES_128_GCM_SHA256, TLS_VERSION_1_3},
     selfencrypt::SelfEncrypt,
@@ -208,7 +208,7 @@ impl AddressValidation {
             .zip(TOKEN_IDENTIFIER_RETRY.iter())
             .map(|(a, b)| (a ^ b).count_ones())
             .sum();
-        expect_usize(difference) < TOKEN_IDENTIFIER_RETRY.len()
+        usize::try_from(difference).expect("u32 fits in usize") < TOKEN_IDENTIFIER_RETRY.len()
     }
 
     pub fn validate(
@@ -399,7 +399,7 @@ struct NewTokenFrameStatus {
 }
 
 impl NewTokenFrameStatus {
-    const fn len(&self) -> usize {
+    fn len(&self) -> usize {
         1 + Encoder::vvec_len(self.token.len())
     }
 }

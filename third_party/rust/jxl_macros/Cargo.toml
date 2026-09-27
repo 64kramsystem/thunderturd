@@ -11,9 +11,8 @@
 
 [package]
 edition = "2024"
-rust-version = "1.89.0"
 name = "jxl_macros"
-version = "0.7.4"
+version = "0.4.3"
 authors = ["Luca Versari <veluca93@gmail.com>"]
 build = false
 autolib = false
@@ -22,7 +21,7 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "High performance Rust implementation of a JPEG XL decoder - supporting macros"
-readme = "README.md"
+readme = "../README.md"
 keywords = [
     "jpeg-xl",
     "decoder",
@@ -30,7 +29,6 @@ keywords = [
 categories = ["multimedia::images"]
 license = "BSD-3-Clause"
 repository = "https://github.com/libjxl/jxl-rs"
-resolver = "2"
 
 [features]
 test = []
@@ -40,11 +38,10 @@ name = "jxl_macros"
 path = "src/lib.rs"
 proc-macro = true
 
-[dependencies.proc-macro2]
-version = "1.0"
-
-[dependencies.quote]
-version = "1.0"
+[dependencies]
+proc-macro-error2 = "2.0.1"
+proc-macro2 = "1.0"
+quote = "1.0"
 
 [dependencies.syn]
 version = "2.0.90"
@@ -54,7 +51,6 @@ features = [
 ]
 
 [lints.clippy]
-chunks_exact_to_as_chunks = "allow"
 missing_safety_doc = "deny"
 undocumented_unsafe_blocks = "deny"
 

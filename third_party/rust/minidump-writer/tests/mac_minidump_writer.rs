@@ -7,7 +7,6 @@ use {
         MinidumpModuleList, MinidumpSystemInfo, MinidumpThreadList,
     },
     minidump_writer::minidump_writer::MinidumpWriter,
-    std::os::unix::process::ExitStatusExt,
 };
 
 mod common;
@@ -68,11 +67,6 @@ fn capture_minidump(name: &str, exception_kind: u32) -> Captured<'_> {
         .expect("failed to send ack");
 
     child.kill().expect("failed to kill child");
-    // Reap child
-    let waitres = child.wait().expect("Failed to wait for child");
-    let status = waitres.signal().expect("Child did not die due to signal");
-    assert_eq!(waitres.code(), None);
-    assert_eq!(status, libc::SIGKILL);
 
     let minidump = Minidump::read_path(tmpfile.path()).expect("failed to read minidump");
 

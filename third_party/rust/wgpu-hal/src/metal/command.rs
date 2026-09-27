@@ -14,7 +14,7 @@ use objc2_metal::{
 };
 
 use super::{
-    adapter::{self, MAX_BUFFERS},
+    adapter::{self, VERTEX_BUFFER_SLOT_START},
     conv, TimestampQuerySupport,
 };
 use crate::CommandEncoder as _;
@@ -23,9 +23,8 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{ops::Range, ptr::NonNull};
+use core::{ops::Range, ptr::NonNull, sync::atomic};
 use smallvec::SmallVec;
-use wgpu_sync::atomic;
 
 // has to match `Temp::binding_sizes`
 const WORD_SIZE: usize = 4;
@@ -164,9 +163,6 @@ impl super::CommandEncoder {
             debug_assert!(self.state.render.is_none() && self.state.compute.is_none());
             let cmd_buf = self.raw_cmd_buf.as_ref().unwrap();
 
-            // This code path is currently unused since the written timestamp is always 0.
-            // We should see if we can get it working again, if not remove the code.
-            //
             // Take care of pending timer queries.
             // If we can't use `sample_counters_in_buffer` we have to create a dummy blit encoder!
             //
@@ -351,31 +347,12 @@ impl super::CommandEncoder {
                     }
                     let index = (resource_indices.buffers + index) as usize;
                     encoder.set_buffer(buffer, offset as usize, index);
-                    let br = naga::ResourceBinding {
-                        group: group_index,
-                        binding: *binding_location,
-                    };
                     if let Some(size) = binding_size {
-                        self.state.storage_buffer_length_map.insert((br, 0), *size);
-                        changes_sizes_buffer = true;
-                    }
-                }
-                super::BufferLikeResource::StorageBindingArray {
-                    ptr,
-                    array_element_sizes,
-                    binding_location,
-                } => {
-                    let buffer = Some(unsafe { ptr.as_ref() });
-                    let index = (resource_indices.buffers + index) as usize;
-                    encoder.set_buffer(buffer, 0, index);
-                    let br = naga::ResourceBinding {
-                        group: group_index,
-                        binding: *binding_location,
-                    };
-                    for &(array_idx, size) in array_element_sizes {
-                        self.state
-                            .storage_buffer_length_map
-                            .insert((br, array_idx), size);
+                        let br = naga::ResourceBinding {
+                            group: group_index,
+                            binding: *binding_location,
+                        };
+                        self.state.storage_buffer_length_map.insert(br, *size);
                         changes_sizes_buffer = true;
                     }
                 }
@@ -450,9 +427,9 @@ impl super::CommandState {
         let slot = stage_info.sizes_slot?;
 
         result_sizes.clear();
-        result_sizes.extend(stage_info.sized_bindings.iter().map(|(br, array_idx)| {
+        result_sizes.extend(stage_info.sized_bindings.iter().map(|br| {
             self.storage_buffer_length_map
-                .get(&(*br, *array_idx))
+                .get(br)
                 .map(|size| u32::try_from(size.get()).unwrap_or(u32::MAX))
                 .unwrap_or_default()
         }));
@@ -480,7 +457,6 @@ impl crate::CommandEncoder for super::CommandEncoder {
     unsafe fn begin_encoding(&mut self, label: crate::Label) -> Result<(), crate::DeviceError> {
         let queue = &self.queue_shared.raw;
         let retain_references = self.shared.settings.retain_command_buffer_references;
-        let relay = self.queue_shared.relay.get();
 
         // Guard against exhausting Metal's command buffer budget. Use the hard
         // limit (`MAX_COMMAND_BUFFERS`) so we fail before Metal can hang inside
@@ -510,13 +486,6 @@ impl crate::CommandEncoder for super::CommandEncoder {
             .unwrap();
             if let Some(label) = label {
                 cmd_buf_ref.setLabel(Some(&NSString::from_str(label)));
-            }
-            // If strict event sync is enabled on this queue, gate the
-            // CB on the relay event at the value the next submit will
-            // signal. The CB pauses at the start until the relay fires.
-            if let Some(relay) = relay {
-                let expected = relay.next_release_value.load(atomic::Ordering::Acquire);
-                cmd_buf_ref.encodeWaitForEvent_value(relay.event.as_ref(), expected);
             }
             cmd_buf_ref.to_owned()
         });
@@ -909,18 +878,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 if let Some(at) = at.as_ref() {
                     let at_descriptor =
                         unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(i) };
-                    at_descriptor.setTexture(Some(&at.target.view.attachment.texture));
-                    at_descriptor.setLevel(at.target.view.attachment.base_mip_level as _);
-                    at_descriptor.setSlice(at.target.view.attachment.base_array_layer as _);
-
+                    at_descriptor.setTexture(Some(&at.target.view.raw));
                     if let Some(depth_slice) = at.depth_slice {
                         at_descriptor.setDepthPlane(depth_slice as usize);
                     }
                     if let Some(ref resolve) = at.resolve_target {
-                        at_descriptor.setResolveTexture(Some(&resolve.view.attachment.texture));
-                        at_descriptor.setResolveLevel(resolve.view.attachment.base_mip_level as _);
-                        at_descriptor
-                            .setResolveSlice(resolve.view.attachment.base_array_layer as _);
+                        //Note: the selection of levels and slices is already handled by `TextureView`
+                        at_descriptor.setResolveTexture(Some(&resolve.view.raw));
                     }
                     let load_action = if at.ops.contains(crate::AttachmentOps::LOAD) {
                         MTLLoadAction::Load
@@ -944,9 +908,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             if let Some(ref at) = desc.depth_stencil_attachment {
                 if at.target.view.aspects.contains(crate::FormatAspects::DEPTH) {
                     let at_descriptor = descriptor.depthAttachment();
-                    at_descriptor.setTexture(Some(&at.target.view.attachment.texture));
-                    at_descriptor.setLevel(at.target.view.attachment.base_mip_level as _);
-                    at_descriptor.setSlice(at.target.view.attachment.base_array_layer as _);
+                    at_descriptor.setTexture(Some(&at.target.view.raw));
 
                     let load_action = if at.depth_ops.contains(crate::AttachmentOps::LOAD) {
                         MTLLoadAction::Load
@@ -973,9 +935,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
                     .contains(crate::FormatAspects::STENCIL)
                 {
                     let at_descriptor = descriptor.stencilAttachment();
-                    at_descriptor.setTexture(Some(&at.target.view.attachment.texture));
-                    at_descriptor.setLevel(at.target.view.attachment.base_mip_level as _);
-                    at_descriptor.setSlice(at.target.view.attachment.base_array_layer as _);
+                    at_descriptor.setTexture(Some(&at.target.view.raw));
 
                     let load_action = if at.stencil_ops.contains(crate::AttachmentOps::LOAD) {
                         MTLLoadAction::Load
@@ -1119,8 +1079,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
             );
             self.update_bind_group_state(
                 Encoder::Task(&encoder),
-                // ts's resources come right after vs's
-                group.counters.vs.clone(),
+                // All zeros, as ts comes first
+                super::ResourceData::default(),
                 bg_info,
                 dynamic_offsets,
                 group_index,
@@ -1128,11 +1088,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             );
             self.update_bind_group_state(
                 Encoder::Mesh(&encoder),
-                super::ResourceData {
-                    buffers: group.counters.vs.buffers + group.counters.ts.buffers,
-                    textures: group.counters.vs.textures + group.counters.ts.textures,
-                    samplers: group.counters.vs.samplers + group.counters.ts.samplers,
-                },
+                group.counters.ts.clone(),
                 bg_info,
                 dynamic_offsets,
                 group_index,
@@ -1425,7 +1381,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         index: u32,
         binding: crate::BufferBinding<'a, super::Buffer>,
     ) {
-        let buffer_index = MAX_BUFFERS - 1 - index;
+        let buffer_index = VERTEX_BUFFER_SLOT_START + index;
         let encoder = self.state.render.as_ref().unwrap();
         unsafe {
             encoder.setVertexBuffer_offset_atIndex(
@@ -1928,31 +1884,6 @@ impl crate::CommandEncoder for super::CommandEncoder {
             residency_set.addAllocation(ProtocolObject::from_ref(&*dependency.raw));
         }
         residency_set.commit();
-    }
-
-    unsafe fn begin_ray_tracing_pass(&mut self, _desc: &crate::RayTracingPassDescriptor) {
-        unreachable!("Ray tracing pipelines not supported")
-    }
-
-    unsafe fn end_ray_tracing_pass(&mut self) {
-        unreachable!("Ray tracing pipelines not supported")
-    }
-
-    unsafe fn set_ray_tracing_pipeline(
-        &mut self,
-        _pipeline: &<Self::A as crate::Api>::RayTracingPipeline,
-    ) {
-        unreachable!("Ray tracing pipelines not supported")
-    }
-
-    unsafe fn trace_rays(
-        &mut self,
-        _count: [u32; 3],
-        _ray_generation_group_data: crate::PipelineGroupData<super::Buffer>,
-        _miss_group_data: crate::PipelineGroupData<super::Buffer>,
-        _intersection_group_data: crate::PipelineGroupData<super::Buffer>,
-    ) {
-        unreachable!("Ray tracing pipelines not supported")
     }
 }
 

@@ -10,20 +10,15 @@ use test_fixture::fixture_init;
 
 use super::enc_dec_hframe;
 use crate::{
-    Priority,
-    frames::{HFrame, HFrameType, reader::FrameDecoder as _},
+    Priority, PushId,
+    frames::HFrame,
     settings::{HSetting, HSettingType, HSettings},
 };
 
 #[test]
-fn max_frame_data_unknown_type_is_unbounded() {
-    assert_eq!(HFrame::max_frame_data(HFrameType(0x124b)), usize::MAX);
-}
-
-#[test]
 fn data_frame() {
     let f = HFrame::Data { len: 3 };
-    enc_dec_hframe(&f, "0003010203", 3, true);
+    enc_dec_hframe(&f, "0003010203", 3);
 }
 
 #[test]
@@ -31,7 +26,15 @@ fn headers_frame() {
     let f = HFrame::Headers {
         header_block: vec![0x01, 0x02, 0x03],
     };
-    enc_dec_hframe(&f, "0103010203", 0, true);
+    enc_dec_hframe(&f, "0103010203", 0);
+}
+
+#[test]
+fn cancel_push_frame4() {
+    let f = HFrame::CancelPush {
+        push_id: PushId::new(5),
+    };
+    enc_dec_hframe(&f, "030105", 0);
 }
 
 #[test]
@@ -39,7 +42,16 @@ fn settings_frame4() {
     let f = HFrame::Settings {
         settings: HSettings::new(&[HSetting::new(HSettingType::MaxHeaderListSize, 4)]),
     };
-    enc_dec_hframe(&f, "04020604", 0, false);
+    enc_dec_hframe(&f, "04020604", 0);
+}
+
+#[test]
+fn push_promise_frame4() {
+    let f = HFrame::PushPromise {
+        push_id: PushId::new(4),
+        header_block: vec![0x61, 0x62, 0x63, 0x64],
+    };
+    enc_dec_hframe(&f, "05050461626364", 0);
 }
 
 #[test]
@@ -47,7 +59,7 @@ fn goaway_frame4() {
     let f = HFrame::Goaway {
         stream_id: StreamId::new(5),
     };
-    enc_dec_hframe(&f, "070105", 0, false);
+    enc_dec_hframe(&f, "070105", 0);
 }
 
 #[test]
@@ -75,7 +87,7 @@ fn priority_update_request_default() {
         element_id: 6,
         priority: Priority::default(),
     };
-    enc_dec_hframe(&f, "800f07000106", 0, true);
+    enc_dec_hframe(&f, "800f07000106", 0);
 }
 
 #[test]
@@ -84,7 +96,7 @@ fn priority_update_request_incremental_default() {
         element_id: 7,
         priority: Priority::new(6, false),
     };
-    enc_dec_hframe(&f, "800f07000407753d36", 0, true); // "u=6"
+    enc_dec_hframe(&f, "800f07000407753d36", 0); // "u=6"
 }
 
 #[test]
@@ -93,5 +105,14 @@ fn priority_update_request_urgency_default() {
         element_id: 8,
         priority: Priority::new(3, true),
     };
-    enc_dec_hframe(&f, "800f0700020869", 0, true); // "i"
+    enc_dec_hframe(&f, "800f0700020869", 0); // "i"
+}
+
+#[test]
+fn priority_update_push_default() {
+    let f = HFrame::PriorityUpdatePush {
+        element_id: 10,
+        priority: Priority::default(),
+    };
+    enc_dec_hframe(&f, "800f0701010a", 0);
 }

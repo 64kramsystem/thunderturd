@@ -2,13 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{BasicParseError, Parser, Token};
+use super::{BasicParseError, Parser, ParserInput, Token};
 
 /// Parse the *An+B* notation, as found in the `:nth-child()` selector.
 /// The input is typically the arguments of a function,
 /// in which case the caller needs to check if the arguments’ parser is exhausted.
 /// Return `Ok((A, B))`, or an `Err(..)` for a syntax error.
-pub fn parse_nth(input: &mut Parser) -> Result<(i32, i32), BasicParseError> {
+pub fn parse_nth<'i>(input: &mut Parser<'i, '_>) -> Result<(i32, i32), BasicParseError<'i>> {
     match *input.next()? {
         Token::Number {
             int_value: Some(b), ..
@@ -25,7 +25,8 @@ pub fn parse_nth(input: &mut Parser) -> Result<(i32, i32), BasicParseError> {
                 _ => match parse_n_dash_digits(unit) {
                     Ok(b) => Ok((a, b)),
                     Err(()) => {
-                        Err(BasicParseError::unexpected_token())
+                        let unit = unit.clone();
+                        Err(input.new_basic_unexpected_token_error(Token::Ident(unit)))
                     }
                 }
             }
@@ -47,7 +48,8 @@ pub fn parse_nth(input: &mut Parser) -> Result<(i32, i32), BasicParseError> {
                     match parse_n_dash_digits(slice) {
                         Ok(b) => Ok((a, b)),
                         Err(()) => {
-                            Err(BasicParseError::unexpected_token())
+                            let value = value.clone();
+                            Err(input.new_basic_unexpected_token_error(Token::Ident(value)))
                         }
                     }
                 }
@@ -61,18 +63,25 @@ pub fn parse_nth(input: &mut Parser) -> Result<(i32, i32), BasicParseError> {
                     _ => match parse_n_dash_digits(value) {
                         Ok(b) => Ok((1, b)),
                         Err(()) => {
-                            Err(BasicParseError::unexpected_token())
+                            let value = value.clone();
+                            Err(input.new_basic_unexpected_token_error(Token::Ident(value)))
                         }
                     }
                 }
             }
-            _ => Err(BasicParseError::unexpected_token()),
+            ref token => {
+                let token = token.clone();
+                Err(input.new_basic_unexpected_token_error(token))
+            }
         },
-        _ => Err(BasicParseError::unexpected_token()),
+        ref token => {
+            let token = token.clone();
+            Err(input.new_basic_unexpected_token_error(token))
+        }
     }
 }
 
-fn parse_b(input: &mut Parser, a: i32) -> Result<(i32, i32), BasicParseError> {
+fn parse_b<'i>(input: &mut Parser<'i, '_>, a: i32) -> Result<(i32, i32), BasicParseError<'i>> {
     let start = input.state();
     match input.next() {
         Ok(&Token::Delim('+')) => parse_signless_b(input, a, 1),
@@ -89,18 +98,19 @@ fn parse_b(input: &mut Parser, a: i32) -> Result<(i32, i32), BasicParseError> {
     }
 }
 
-fn parse_signless_b(
-    input: &mut Parser,
+fn parse_signless_b<'i>(
+    input: &mut Parser<'i, '_>,
     a: i32,
     b_sign: i32,
-) -> Result<(i32, i32), BasicParseError> {
-    match input.next()? {
-        &Token::Number {
+) -> Result<(i32, i32), BasicParseError<'i>> {
+    // FIXME: remove .clone() when lifetimes are non-lexical.
+    match input.next()?.clone() {
+        Token::Number {
             has_sign: false,
             int_value: Some(b),
             ..
         } => Ok((a, b_sign * b)),
-        _ => Err(BasicParseError::unexpected_token()),
+        token => Err(input.new_basic_unexpected_token_error(token)),
     }
 }
 
@@ -117,7 +127,8 @@ fn parse_n_dash_digits(string: &str) -> Result<i32, ()> {
 }
 
 fn parse_number_saturate(string: &str) -> Result<i32, ()> {
-    let mut parser = Parser::new(string);
+    let mut input = ParserInput::new(string);
+    let mut parser = Parser::new(&mut input);
     let int = if let Ok(&Token::Number {
         int_value: Some(int),
         ..

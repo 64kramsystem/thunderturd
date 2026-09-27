@@ -1,9 +1,10 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{ffi, mem::ManuallyDrop, ptr, time::Duration};
+use std::sync::LazyLock;
 
 use glow::HasContext;
 use hashbrown::HashMap;
-use wgpu_sync::{Lazy, MappedMutexGuard, Mutex, MutexGuard, RwLock};
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard, RwLock};
 
 /// The amount of time to wait while trying to obtain a lock to the adapter context
 const CONTEXT_LOCK_TIMEOUT_SECS: u64 = 6;
@@ -123,18 +124,9 @@ fn choose_config(
         log::debug!("\tTrying {name}");
 
         attributes.clear();
-        let mut surface_type = 0;
         for &(_, tier_attr) in tiers[..=tier_max].iter() {
-            for attribute in tier_attr.chunks_exact(2) {
-                if attribute[0] == khronos_egl::SURFACE_TYPE {
-                    surface_type |= attribute[1];
-                } else {
-                    attributes.extend_from_slice(attribute);
-                }
-            }
+            attributes.extend_from_slice(tier_attr);
         }
-        // Duplicate EGL attribute keys are undefined and make Mesa return no configs.
-        attributes.extend_from_slice(&[khronos_egl::SURFACE_TYPE, surface_type]);
         // make sure the Alpha is enough to support sRGB
         match srgb_kind {
             SrgbFrameBufferKind::None => {}
@@ -201,7 +193,6 @@ impl EglContext {
 
 /// A wrapper around a [`glow::Context`] and the required EGL context that uses locking to guarantee
 /// exclusive access when shared with multiple threads.
-#[derive(Debug)]
 pub struct AdapterContext {
     glow: Mutex<ManuallyDrop<glow::Context>>,
     egl: Option<EglContext>,
@@ -275,7 +266,6 @@ struct EglContextLock<'a> {
 }
 
 /// A guard containing a lock to an [`AdapterContext`], while the GL context is kept current.
-#[expect(missing_debug_implementations)]
 pub struct AdapterContextLock<'a> {
     glow: MutexGuard<'a, ManuallyDrop<glow::Context>>,
     egl: Option<EglContextLock<'a>>,
@@ -362,7 +352,8 @@ unsafe impl Sync for Inner {}
 // Different calls to `eglGetPlatformDisplay` may return the same `Display`, making it a global
 // state of all our `EglContext`s. This forces us to track the number of such context to prevent
 // terminating the display if it's currently used by another `EglContext`.
-static DISPLAYS_REFERENCE_COUNT: Lazy<Mutex<HashMap<usize, usize>>> = Lazy::new(Default::default);
+static DISPLAYS_REFERENCE_COUNT: LazyLock<Mutex<HashMap<usize, usize>>> =
+    LazyLock::new(Default::default);
 
 fn initialize_display(
     egl: &EglInstance,
@@ -689,7 +680,6 @@ struct WindowSystemInterface {
     kind: WindowKind,
 }
 
-#[derive(Debug)]
 pub struct Instance {
     wsi: WindowSystemInterface,
     flags: wgt::InstanceFlags,
@@ -712,6 +702,13 @@ impl Instance {
             .try_lock()
             .expect("Could not lock instance. This is most-likely a deadlock.")
             .version
+    }
+
+    pub fn egl_config(&self) -> khronos_egl::Config {
+        self.inner
+            .try_lock()
+            .expect("Could not lock instance. This is most-likely a deadlock.")
+            .config
     }
 }
 
@@ -767,31 +764,6 @@ impl crate::Instance for Instance {
         let egl1_5: Option<&Arc<EglInstance>> = Some(&egl);
 
         let (display, wsi_kind) = match (desc.display.map(|d| d.as_raw()), egl1_5) {
-            (Some(Rdh::Windows(_)) | None, Some(egl))
-                if cfg!(windows)
-                    && client_ext_str.contains("EGL_ANGLE_platform_angle")
-                    && client_ext_str.contains("EGL_ANGLE_platform_angle_d3d") =>
-            {
-                log::debug!("Using Angle platform with D3D11");
-                const EGL_PLATFORM_ANGLE_TYPE_ANGLE: u32 = 0x3203;
-                const EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE: u32 = 0x3208;
-                let display_attributes = [
-                    EGL_PLATFORM_ANGLE_TYPE_ANGLE as khronos_egl::Attrib,
-                    EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE as khronos_egl::Attrib,
-                    EGL_PLATFORM_ANGLE_DEBUG_LAYERS_ENABLED as khronos_egl::Attrib,
-                    usize::from(desc.flags.contains(wgt::InstanceFlags::VALIDATION)),
-                    khronos_egl::ATTRIB_NONE,
-                ];
-                let display = unsafe {
-                    egl.get_platform_display(
-                        EGL_PLATFORM_ANGLE_ANGLE,
-                        khronos_egl::DEFAULT_DISPLAY,
-                        &display_attributes,
-                    )
-                }
-                .map_err(instance_err("failed to get Angle D3D11 display"))?;
-                (display, WindowKind::Unknown)
-            }
             (Some(Rdh::Wayland(wayland_display_handle)), Some(egl))
                 if client_ext_str.contains("EGL_EXT_platform_wayland") =>
             {
@@ -1108,7 +1080,7 @@ impl super::Device {
 #[derive(Debug)]
 pub struct Swapchain {
     surface: khronos_egl::Surface,
-    wl_window: Option<*mut ffi::c_void>,
+    wl_window: Option<*mut wayland_sys::egl::wl_egl_window>,
     framebuffer: glow::Framebuffer,
     renderbuffer: glow::Renderbuffer,
     /// Extent because the window lies
@@ -1216,7 +1188,10 @@ impl Surface {
     unsafe fn unconfigure_impl(
         &self,
         device: &super::Device,
-    ) -> Option<(khronos_egl::Surface, Option<*mut ffi::c_void>)> {
+    ) -> Option<(
+        khronos_egl::Surface,
+        Option<*mut wayland_sys::egl::wl_egl_window>,
+    )> {
         let gl = &device.shared.context.lock();
         match self.swapchain.write().take() {
             Some(sc) => {
@@ -1248,12 +1223,11 @@ impl crate::Surface for Surface {
 
         let (surface, wl_window) = match unsafe { self.unconfigure_impl(device) } {
             Some((sc, wl_window)) => {
-                #[cfg(unix)]
                 if let Some(window) = wl_window {
                     wayland_sys::ffi_dispatch!(
                         wayland_sys::egl::wayland_egl_handle(),
                         wl_egl_window_resize,
-                        window.cast(),
+                        window,
                         config.extent.width as i32,
                         config.extent.height as i32,
                         0,
@@ -1264,7 +1238,6 @@ impl crate::Surface for Surface {
                 (sc, wl_window)
             }
             None => {
-                #[cfg_attr(not(unix), expect(unused_mut))]
                 let mut wl_window = None;
                 let (mut temp_xlib_handle, mut temp_xcb_handle);
                 let native_window_ptr = match (self.wsi.kind, self.raw_window_handle) {
@@ -1293,7 +1266,7 @@ impl crate::Surface for Surface {
                             config.extent.width as i32,
                             config.extent.height as i32,
                         );
-                        wl_window = Some(window.cast());
+                        wl_window = Some(window);
                         window.cast()
                     }
                     #[cfg(Emscripten)]
@@ -1342,7 +1315,7 @@ impl crate::Surface for Surface {
                         khronos_egl::SINGLE_BUFFER
                     },
                 ];
-                if config.format.has_srgb_suffix() {
+                if config.format.is_srgb() {
                     match self.srgb_kind {
                         SrgbFrameBufferKind::None => {}
                         SrgbFrameBufferKind::Core => {
@@ -1451,12 +1424,11 @@ impl crate::Surface for Surface {
                 .instance
                 .destroy_surface(self.egl.display, surface)
                 .unwrap();
-            if let Some(_window) = wl_window {
-                #[cfg(unix)]
+            if let Some(window) = wl_window {
                 wayland_sys::ffi_dispatch!(
                     wayland_sys::egl::wayland_egl_handle(),
                     wl_egl_window_destroy,
-                    _window.cast(),
+                    window,
                 );
             }
         }

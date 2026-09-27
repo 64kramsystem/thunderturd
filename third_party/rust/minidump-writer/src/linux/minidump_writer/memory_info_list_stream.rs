@@ -9,7 +9,11 @@ pub enum SectionMemInfoListError {
     #[error("Failed to write to memory")]
     MemoryWriterError(#[from] MemoryWriterError),
     #[error("failed to open /proc/<pid>/maps file")]
-    ReadFileFailed(#[source] process_inspection::Error),
+    ReadFileFailed(
+        #[source]
+        #[serde(serialize_with = "serialize_io_error")]
+        std::io::Error,
+    ),
     #[error("Failed to read from procfs")]
     ProcfsError(
         #[from]
@@ -27,7 +31,7 @@ impl MinidumpWriter {
         let path = format!("/proc/{}/maps", self.blamed_thread);
         let reader = self
             .process_inspector
-            .read_file(path.into())
+            .read_file(&path)
             .map_err(SectionMemInfoListError::ReadFileFailed)?;
         let maps = procfs_core::process::MemoryMaps::from_read(reader)?;
 

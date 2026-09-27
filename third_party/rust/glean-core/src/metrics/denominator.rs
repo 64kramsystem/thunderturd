@@ -8,6 +8,7 @@ use crate::metrics::CounterMetric;
 use crate::metrics::Metric;
 use crate::metrics::MetricType;
 use crate::metrics::RateMetric;
+use crate::storage::StorageManager;
 use crate::Glean;
 use crate::{CommonMetricData, TestGetValue};
 
@@ -95,11 +96,11 @@ impl DenominatorMetric {
             .into()
             .unwrap_or_else(|| &self.meta().inner.send_in_pings[0]);
 
-        match glean.storage().get_metric(
-            #[cfg(not(feature = "sqlite"))]
-            glean,
-            self.meta(),
+        match StorageManager.snapshot_metric(
+            glean.storage(),
             queried_ping_name,
+            &self.meta().identifier(glean),
+            self.meta().inner.lifetime,
         ) {
             Some(Metric::Counter(i)) => Some(i),
             _ => None,

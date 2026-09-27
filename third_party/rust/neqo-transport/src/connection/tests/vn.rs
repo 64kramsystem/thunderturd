@@ -286,7 +286,9 @@ fn compatible_upgrade_large_initial() {
     client.process_input(dgram.unwrap(), now());
 
     // Connect, but strip padding from all the packets to keep the accounting tight.
-    connect_rtt_idle_with_modifier(&mut client, &mut server, Duration::new(0, 0), strip_padding);
+    connect_rtt_idle_with_modifier(&mut client, &mut server, Duration::new(0, 0), |dgram| {
+        Some(strip_padding(dgram))
+    });
     assert_eq!(client.version(), Version::Version2);
     assert_eq!(server.version(), Version::Version2);
     // We removed padding, so no packets should be dropped.

@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.90.0"
 name = "neqo-http3"
-version = "0.31.1"
+version = "0.29.0"
 authors = ["The Neqo Authors <necko@mozilla.com>"]
 build = false
 autolib = false
@@ -50,6 +50,7 @@ name = "streams_simulated"
 
 [package.metadata.bench.codspeed]
 mode = "simulation"
+memory = false
 
 [[package.metadata.bench]]
 name = "streams_walltime"
@@ -149,7 +150,7 @@ path = "./../neqo-transport"
 default-features = false
 
 [dependencies.nss]
-version = "0.14"
+version = "0.13.0"
 git = "https://github.com/mozilla/nss-rs"
 package = "nss-rs"
 
@@ -167,10 +168,6 @@ version = "0.14"
 features = ["parsed-types"]
 default-features = false
 
-[dependencies.static_assertions]
-version = "1.1"
-default-features = false
-
 [dependencies.strum]
 version = "0.27"
 features = ["derive"]
@@ -181,7 +178,7 @@ version = "2.0.12"
 default-features = false
 
 [dev-dependencies.criterion]
-version = "5"
+version = "4"
 default-features = false
 package = "codspeed-criterion-compat"
 
@@ -196,7 +193,6 @@ path = "../test-fixture"
 [lints.clippy]
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
-assert_is_empty = "allow"
 cfg_not_test = "warn"
 clone_on_ref_ptr = "warn"
 create_dir = "warn"

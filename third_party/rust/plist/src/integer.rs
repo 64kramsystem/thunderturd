@@ -9,12 +9,21 @@ pub struct Integer {
 impl Integer {
     /// Returns the value as an `i64` if it can be represented by that type.
     pub fn as_signed(self) -> Option<i64> {
-        i64::try_from(self.value).ok()
+        if self.value >= i128::from(i64::min_value()) && self.value <= i128::from(i64::max_value())
+        {
+            Some(self.value as i64)
+        } else {
+            None
+        }
     }
 
     /// Returns the value as a `u64` if it can be represented by that type.
     pub fn as_unsigned(self) -> Option<u64> {
-        u64::try_from(self.value).ok()
+        if self.value >= 0 && self.value <= i128::from(u64::max_value()) {
+            Some(self.value as u64)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn from_str(s: &str) -> Result<Self, ParseIntError> {
@@ -138,7 +147,7 @@ pub mod serde_impls {
 
     struct IntegerVisitor;
 
-    impl Visitor<'_> for IntegerVisitor {
+    impl<'de> Visitor<'de> for IntegerVisitor {
         type Value = Integer;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

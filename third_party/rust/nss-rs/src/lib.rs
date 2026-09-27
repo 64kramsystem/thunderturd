@@ -76,7 +76,8 @@ pub use self::{
     util::*,
 };
 
-const MINIMUM_NSS_VERSION: &str = env!("NSS_MIN_VERSION");
+mod min_version;
+use min_version::MINIMUM_NSS_VERSION;
 
 pub mod nss_prelude {
     #![allow(

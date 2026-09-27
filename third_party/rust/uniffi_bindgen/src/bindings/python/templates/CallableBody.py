@@ -1,11 +1,11 @@
 {%- for arg in callable.arguments %}
 {%- if let Some(default) = arg.default %}
-{%- if !default.is_arg_literal() %}
+{%- if !default.is_arg_literal %}
 if {{ arg.name }} is {{ default.arg_literal }}:
     {{ arg.name }} = {{ default.py_default }}
 {%- endif %}
 {%- endif %}
-{{ arg.ffi_converter_name() }}.check_lower({{ arg.name }})
+{{ arg.ty.ffi_converter_name }}.check_lower({{ arg.name }})
 {% endfor -%}
 
  _uniffi_lowered_args = (
@@ -18,7 +18,7 @@ if {{ arg.name }} is {{ default.arg_literal }}:
     {%-     endmatch %}
     {%- endif %}
     {%- for arg in callable.arguments %}
-    {{ arg.ffi_converter_name() }}.lower({{ arg.name }}),
+    {{ arg.ty.ffi_converter_name }}.lower({{ arg.name }}),
     {%- endfor %}
 )
 
@@ -31,11 +31,14 @@ _uniffi_lift_return = lambda val: None
 
 {%- match callable.throws_type.ty %}
 {%- when Some(e) %}
-{%-    if callable.throws_type.from_interface %}
+{%-    match e.ty %}
+{%-    when Type::Enum { .. } %}
+_uniffi_error_converter = {{ e.ffi_converter_name }}
+{%-    when Type::Interface { .. } %}
 _uniffi_error_converter = {{ e.ffi_converter_name }}__as_error
 {%-    else %}
-_uniffi_error_converter = {{ e.ffi_converter_name }}
-{%-    endif %}
+_uniffi_error_converter = "UNSUPPORTED ERROR TYPE: {{"{:?}"|format(e) }}"
+{%-    endmatch %}
 {%- when None %}
 _uniffi_error_converter = None
 {%- endmatch %}

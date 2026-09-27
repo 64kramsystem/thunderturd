@@ -540,7 +540,6 @@ impl<'a> Context<'a> {
     }
 
     /// Internal implementation of [`lower`](Self::lower)
-    #[allow(clippy::large_stack_frames)] // TODO(https://github.com/gfx-rs/wgpu/issues/9456)
     fn lower_inner(
         &mut self,
         stmt: &StmtContext,

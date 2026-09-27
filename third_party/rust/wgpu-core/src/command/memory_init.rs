@@ -359,30 +359,28 @@ impl BakedCommands {
 
         let mut ranges: Vec<TextureInitRange> = Vec::new();
         for texture_use in self.texture_memory_actions.drain_init_actions() {
-            {
-                let mut initialization_status = texture_use.texture.initialization_status.write();
-                let use_range = texture_use.range;
-                let affected_mip_trackers = initialization_status
-                    .mips
-                    .iter_mut()
-                    .enumerate()
-                    .skip(use_range.mip_range.start as usize)
-                    .take((use_range.mip_range.end - use_range.mip_range.start) as usize);
+            let mut initialization_status = texture_use.texture.initialization_status.write();
+            let use_range = texture_use.range;
+            let affected_mip_trackers = initialization_status
+                .mips
+                .iter_mut()
+                .enumerate()
+                .skip(use_range.mip_range.start as usize)
+                .take((use_range.mip_range.end - use_range.mip_range.start) as usize);
 
-                match texture_use.kind {
-                    MemoryInitKind::ImplicitlyInitialized => {
-                        for (_, mip_tracker) in affected_mip_trackers {
-                            mip_tracker.drain(use_range.layer_range.clone());
-                        }
+            match texture_use.kind {
+                MemoryInitKind::ImplicitlyInitialized => {
+                    for (_, mip_tracker) in affected_mip_trackers {
+                        mip_tracker.drain(use_range.layer_range.clone());
                     }
-                    MemoryInitKind::NeedsInitializedMemory => {
-                        for (mip_level, mip_tracker) in affected_mip_trackers {
-                            for layer_range in mip_tracker.drain(use_range.layer_range.clone()) {
-                                ranges.push(TextureInitRange {
-                                    mip_range: (mip_level as u32)..(mip_level as u32 + 1),
-                                    layer_range,
-                                });
-                            }
+                }
+                MemoryInitKind::NeedsInitializedMemory => {
+                    for (mip_level, mip_tracker) in affected_mip_trackers {
+                        for layer_range in mip_tracker.drain(use_range.layer_range.clone()) {
+                            ranges.push(TextureInitRange {
+                                mip_range: (mip_level as u32)..(mip_level as u32 + 1),
+                                layer_range,
+                            });
                         }
                     }
                 }
@@ -502,7 +500,7 @@ impl BakedCommands {
 
         for mut resolve in self.deferred_query_set_resolves.drain(..).rev() {
             let raw_dst = resolve.dst_buffer.try_raw(snatch_guard).unwrap();
-            let raw_query_set = resolve.query_set.try_raw(snatch_guard).unwrap();
+            let raw_query_set = resolve.query_set.raw();
 
             let raw_encoder = self.encoder.open_pass(crate::hal_label(
                 Some("(wgpu internal) Deferred query set resolve"),
@@ -553,7 +551,7 @@ impl BakedCommands {
         }
 
         // Update query set initialization state.
-        for query_set in self.trackers.query_sets.used_resources() {
+        for query_set in &self.trackers.query_sets {
             if let Some(slots) = self.query_set_writes.get(&query_set.tracker_index()) {
                 let mut initialized = query_set.initialized_slots.lock();
                 initialized.or(slots);

@@ -1,3 +1,4 @@
+use crate::error::Needed;
 use crate::stream::AsBStr;
 use crate::stream::AsBytes;
 use crate::stream::Checkpoint;
@@ -5,7 +6,6 @@ use crate::stream::Compare;
 use crate::stream::CompareResult;
 use crate::stream::FindSlice;
 use crate::stream::Location;
-use crate::stream::Needed;
 use crate::stream::Offset;
 #[cfg(feature = "unstable-recover")]
 #[cfg(feature = "std")]
@@ -37,7 +37,6 @@ use crate::stream::UpdateSlice;
 /// Here is how it works in practice:
 ///
 /// ```rust
-/// # #[cfg(feature = "ascii")] {
 /// # use winnow::{Result, error::ErrMode, error::Needed, error::ContextError, token, ascii, stream::Partial};
 /// # use winnow::prelude::*;
 ///
@@ -80,7 +79,6 @@ use crate::stream::UpdateSlice;
 ///
 /// // while the complete version knows that all of the data is there
 /// assert_eq!(alpha0_complete.parse_peek("abcd"), Ok(("", "abcd")));
-/// # }
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Partial<I> {
@@ -120,7 +118,7 @@ where
     }
 }
 
-impl<I> core::ops::Deref for Partial<I> {
+impl<I> crate::lib::std::ops::Deref for Partial<I> {
     type Target = I;
 
     #[inline(always)]
@@ -129,8 +127,8 @@ impl<I> core::ops::Deref for Partial<I> {
     }
 }
 
-impl<I: core::fmt::Display> core::fmt::Display for Partial<I> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl<I: crate::lib::std::fmt::Display> crate::lib::std::fmt::Display for Partial<I> {
+    fn fmt(&self, f: &mut crate::lib::std::fmt::Formatter<'_>) -> crate::lib::std::fmt::Result {
         self.input.fmt(f)
     }
 }
@@ -211,8 +209,9 @@ impl<I: Stream> Stream for Partial<I> {
         self.input.reset(&checkpoint.inner);
     }
 
-    fn trace(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.input.trace(f)
+    #[inline(always)]
+    fn raw(&self) -> &dyn crate::lib::std::fmt::Debug {
+        &self.input
     }
 }
 
@@ -336,7 +335,7 @@ where
     I: FindSlice<T>,
 {
     #[inline(always)]
-    fn find_slice(&self, substr: T) -> Option<core::ops::Range<usize>> {
+    fn find_slice(&self, substr: T) -> Option<crate::lib::std::ops::Range<usize>> {
         self.input.find_slice(substr)
     }
 }

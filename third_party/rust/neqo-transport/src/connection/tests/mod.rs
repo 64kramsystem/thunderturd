@@ -7,7 +7,6 @@
 use std::{
     cell::RefCell,
     cmp::min,
-    convert::identity,
     mem,
     net::SocketAddr,
     rc::Rc,
@@ -49,7 +48,6 @@ mod null;
 mod pmtud;
 mod priority;
 mod recovery;
-mod reset_stream_at;
 mod resumption;
 mod stream;
 mod vn;
@@ -240,8 +238,6 @@ where
         input = output.and_then(&mut modifier);
         qtrace!("handshake: t += {:?}", rtt / 2);
         now += rtt / 2;
-        #[allow(clippy::allow_attributes, // TODO: Switch to expect once MSRV>=1.99.
-                clippy::mut_mut, reason = "Correct here.")]
         mem::swap(&mut a, &mut b);
     }
     if let Some(d) = input {
@@ -275,10 +271,10 @@ fn connect_with_rtt_and_modifier<F>(
     server: &mut Connection,
     now: Instant,
     rtt: Duration,
-    mut modifier: F,
+    modifier: F,
 ) -> Instant
 where
-    F: FnMut(Datagram) -> Datagram,
+    F: FnMut(Datagram) -> Option<Datagram>,
 {
     fn check_rtt(stats: &Stats, rtt: Duration) {
         assert_eq!(stats.rtt, rtt);
@@ -286,7 +282,7 @@ where
         let n = stats.frame_rx.ack + usize::from(stats.rtt_init_guess);
         assert_eq!(stats.rttvar, rttvar_after_n_updates(n, rtt));
     }
-    let now = handshake_with_modifier(client, server, now, rtt, move |d| Some(modifier(d)));
+    let now = handshake_with_modifier(client, server, now, rtt, modifier);
     assert_eq!(*client.state(), State::Confirmed);
     assert_eq!(*server.state(), State::Confirmed);
 
@@ -301,7 +297,7 @@ fn connect_with_rtt(
     now: Instant,
     rtt: Duration,
 ) -> Instant {
-    connect_with_rtt_and_modifier(client, server, now, rtt, identity)
+    connect_with_rtt_and_modifier(client, server, now, rtt, Some)
 }
 
 fn connect(client: &mut Connection, server: &mut Connection) {
@@ -314,16 +310,6 @@ fn assert_error(c: &Connection, expected: &CloseReason) {
             assert_eq!(*error, *expected, "{c} error mismatch");
         }
         _ => panic!("bad state {:?}", c.state()),
-    }
-}
-
-/// Pump datagrams between two peers until neither has anything more to send.
-fn exchange(a: &mut Connection, b: &mut Connection) {
-    let mut d = a.process_output(now()).dgram();
-    while let Some(dgram) = d {
-        let r = b.process(Some(dgram), now()).dgram();
-        mem::swap(a, b);
-        d = r;
     }
 }
 
@@ -367,7 +353,7 @@ fn connect_rtt_idle_with_modifier<F>(
     modifier: F,
 ) -> Instant
 where
-    F: FnMut(Datagram) -> Datagram,
+    F: FnMut(Datagram) -> Option<Datagram>,
 {
     let now = connect_with_rtt_and_modifier(client, server, now(), rtt, modifier);
     assert_idle(client, server, rtt, now);
@@ -379,19 +365,19 @@ where
 }
 
 fn connect_rtt_idle(client: &mut Connection, server: &mut Connection, rtt: Duration) -> Instant {
-    connect_rtt_idle_with_modifier(client, server, rtt, identity)
+    connect_rtt_idle_with_modifier(client, server, rtt, Some)
 }
 
 fn connect_force_idle_with_modifier(
     client: &mut Connection,
     server: &mut Connection,
-    modifier: fn(Datagram) -> Datagram,
+    modifier: fn(Datagram) -> Option<Datagram>,
 ) {
     connect_rtt_idle_with_modifier(client, server, Duration::new(0, 0), modifier);
 }
 
 fn connect_force_idle(client: &mut Connection, server: &mut Connection) {
-    connect_force_idle_with_modifier(client, server, identity);
+    connect_force_idle_with_modifier(client, server, Some);
 }
 
 fn fill_stream(c: &mut Connection, stream: StreamId) {
@@ -613,7 +599,7 @@ fn send_something_paced_with_modifier(
     sender: &mut Connection,
     mut now: Instant,
     allow_pacing: bool,
-    modifier: impl Fn(Datagram) -> Datagram,
+    modifier: fn(Datagram) -> Option<Datagram>,
 ) -> (Datagram, Instant) {
     let stream_id = sender.stream_create(StreamType::UniDi).unwrap();
     assert!(sender.stream_send(stream_id, DEFAULT_STREAM_DATA).is_ok());
@@ -631,7 +617,7 @@ fn send_something_paced_with_modifier(
         Output::Datagram(d) => d,
         Output::None => panic!("send_something: got Output::None"),
     };
-    (modifier(dgram), now)
+    (modifier(dgram).unwrap(), now)
 }
 
 fn send_something_paced(
@@ -639,13 +625,13 @@ fn send_something_paced(
     now: Instant,
     allow_pacing: bool,
 ) -> (Datagram, Instant) {
-    send_something_paced_with_modifier(sender, now, allow_pacing, identity)
+    send_something_paced_with_modifier(sender, now, allow_pacing, Some)
 }
 
 fn send_something_with_modifier(
     sender: &mut Connection,
     now: Instant,
-    modifier: impl Fn(Datagram) -> Datagram,
+    modifier: fn(Datagram) -> Option<Datagram>,
 ) -> Datagram {
     send_something_paced_with_modifier(sender, now, false, modifier).0
 }
@@ -653,7 +639,7 @@ fn send_something_with_modifier(
 /// Send something on a stream from `sender` to `receiver`.
 /// Return the resulting datagram.
 fn send_something(sender: &mut Connection, now: Instant) -> Datagram {
-    send_something_with_modifier(sender, now, identity)
+    send_something_with_modifier(sender, now, Some)
 }
 
 /// Send something, but add a little something extra into the output.
@@ -662,7 +648,7 @@ where
     W: test_internal::FrameWriter + 'static,
 {
     sender.test_frame_writer = Some(Box::new(writer));
-    let res = send_something_with_modifier(sender, now, identity);
+    let res = send_something_with_modifier(sender, now, Some);
     sender.test_frame_writer = None;
     res
 }
@@ -673,7 +659,7 @@ fn send_with_modifier_and_receive(
     sender: &mut Connection,
     receiver: &mut Connection,
     now: Instant,
-    modifier: impl Fn(Datagram) -> Datagram,
+    modifier: fn(Datagram) -> Option<Datagram>,
 ) -> Option<Datagram> {
     let dgram = send_something_with_modifier(sender, now, modifier);
     receiver.process(Some(dgram), now).dgram()
@@ -686,7 +672,7 @@ fn send_and_receive(
     receiver: &mut Connection,
     now: Instant,
 ) -> Option<Datagram> {
-    send_with_modifier_and_receive(sender, receiver, now, identity)
+    send_with_modifier_and_receive(sender, receiver, now, Some)
 }
 
 fn get_tokens(client: &mut Connection) -> Vec<ResumptionToken> {

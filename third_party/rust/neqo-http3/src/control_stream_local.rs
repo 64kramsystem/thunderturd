@@ -67,7 +67,10 @@ impl ControlStreamLocal {
 
             // can assert and unwrap here, because priority updates can only be added to
             // HttpStreams in [Http3Connection::queue_update_priority}
-            debug_assert!(matches!(update_stream.stream_type(), Http3StreamType::Http));
+            debug_assert!(matches!(
+                update_stream.stream_type(),
+                Http3StreamType::Http | Http3StreamType::Push
+            ));
             let stream = update_stream.http_stream().ok_or(Error::Internal)?;
 
             // in case multiple priority_updates were issued, ignore now irrelevant

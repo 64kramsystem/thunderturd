@@ -1,8 +1,5 @@
 use {
-    super::{
-        process_inspection::{self, ProcessInspector},
-        serializers::*,
-    },
+    super::{process_inspection::ProcessInspector, serializers::*},
     crate::module_reader::{ModuleMemoryReadError, ProcessModuleMemoryReader},
     crate::{minidump_format::GUID, serializers::*},
     goblin::{
@@ -22,8 +19,6 @@ const NOTE_SECTION_NAME: &[u8] = b".note.gnu.build-id\0";
 
 #[derive(Debug, thiserror::Error, serde::Serialize)]
 pub enum ModuleReaderError {
-    #[error("failed to map modile into memory")]
-    MapModuleFailed(#[source] process_inspection::Error),
     #[error("failed to read module file ({path}): {error}")]
     MapFile {
         path: std::path::PathBuf,
@@ -160,12 +155,10 @@ fn section_header_with_name<'sc, MM: ReadModuleMemory>(
 }
 
 pub fn read_build_id_from_file(
-    process_inspector: &dyn ProcessInspector,
+    process_inspector: &ProcessInspector,
     path: &Path,
 ) -> Result<Vec<u8>, Error> {
-    let module_memory_reader = process_inspector
-        .map_module_into_memory(path.into(), 0)
-        .map_err(Error::MapModuleFailed)?;
+    let module_memory_reader = process_inspector.read_memory_mapped_module(path, 0)?;
     read_build_id_from_module(module_memory_reader)
 }
 
@@ -191,7 +184,7 @@ pub fn read_build_id_from_module(module_memory: impl ReadModuleMemory) -> Result
 }
 
 pub fn read_soname_from_file(
-    process_inspector: &dyn ProcessInspector,
+    process_inspector: &ProcessInspector,
     path: &Path,
     offset: usize,
 ) -> Result<String, Error> {
@@ -205,13 +198,9 @@ pub fn read_soname_from_file(
         return Err(Error::NotSafeToOpenMapping(path.as_os_str().to_os_string()));
     }
 
-    let module_memory_reader = process_inspector
-        .map_module_into_memory(path.into(), offset)
-        .map_err(Error::MapModuleFailed)?;
+    let module_memory_reader = process_inspector.read_memory_mapped_module(path, offset)?;
 
-    let memory_len = module_memory_reader.len().map_err(Error::MapModuleFailed)?;
-
-    if memory_len < elf::header::SELFMAG {
+    if module_memory_reader.is_empty() || module_memory_reader.len() < elf::header::SELFMAG {
         return Err(Error::MmapSanityCheckFailed);
     }
 
@@ -589,7 +578,7 @@ pub trait ReadModuleMemory {
 }
 
 impl<'a> ReadModuleMemory for ProcessModuleMemoryReader<'a> {
-    fn read(&self, offset: u64, length: u64) -> Result<Cow<'_, [u8]>, ModuleMemoryReadError> {
+    fn read(&self, offset: u64, length: u64) -> Result<Cow<'a, [u8]>, ModuleMemoryReadError> {
         self.read(offset, length)
     }
     fn absolute_to_relative(&self, addr: u64) -> Option<u64> {
@@ -601,21 +590,6 @@ impl<'a> ReadModuleMemory for ProcessModuleMemoryReader<'a> {
     }
     fn is_process_memory(&self) -> bool {
         true
-    }
-}
-
-impl<T: ReadModuleMemory + ?Sized> ReadModuleMemory for &T {
-    fn read(&self, offset: u64, length: u64) -> Result<Cow<'_, [u8]>, ModuleMemoryReadError> {
-        T::read(self, offset, length)
-    }
-    fn absolute_to_relative(&self, addr: u64) -> Option<u64> {
-        T::absolute_to_relative(self, addr)
-    }
-    fn relative_to_absolute(&self, addr: u64) -> Option<u64> {
-        T::relative_to_absolute(self, addr)
-    }
-    fn is_process_memory(&self) -> bool {
-        T::is_process_memory(self)
     }
 }
 

@@ -1,29 +1,32 @@
 use std::borrow::Cow;
+use std::collections::hash_map::{Entry, HashMap};
+use std::fs::read_to_string;
+use std::iter::FusedIterator;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parser::node::Whitespace;
 use parser::{Node, Parsed};
 use proc_macro2::Span;
+use rustc_hash::FxBuildHasher;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Expr, ExprLit, ExprPath, Ident, Lit, LitBool, LitStr, Meta, Token};
 
 use crate::config::{Config, SyntaxAndCache};
-use crate::spans::SourceSpan;
-use crate::{CompileError, FileInfo, HashMap, MsgValidEscapers};
+use crate::{CompileError, FileInfo, MsgValidEscapers, OnceMap};
 
 #[derive(Clone)]
 pub(crate) struct TemplateInput<'a> {
-    pub(crate) template_span: Span,
     pub(crate) ast: &'a syn::DeriveInput,
     pub(crate) enum_ast: Option<&'a syn::DeriveInput>,
     pub(crate) config: &'a Config,
-    pub(crate) syntax: &'a SyntaxAndCache,
+    pub(crate) syntax: &'a SyntaxAndCache<'a>,
     pub(crate) source: &'a Source,
-    pub(crate) source_span: SourceSpan,
+    pub(crate) source_span: Option<Span>,
     pub(crate) block: Option<(&'a str, Span)>,
+    #[cfg(feature = "blocks")]
     pub(crate) blocks: &'a [Block],
     pub(crate) print: Print,
     pub(crate) escaper: &'a str,
@@ -42,9 +45,9 @@ impl TemplateInput<'_> {
         args: &'n TemplateArgs,
     ) -> Result<TemplateInput<'n>, CompileError> {
         let TemplateArgs {
-            template_span,
             source: (source, source_span),
             block,
+            #[cfg(feature = "blocks")]
             blocks,
             print,
             escaping,
@@ -57,11 +60,8 @@ impl TemplateInput<'_> {
         // Validate the `source` and `ext` value together, since they are
         // related. In case `source` was used instead of `path`, the value
         // of `ext` is merged into a synthetic `path` value here.
-        let path: Arc<Path> = match (&source, &ext) {
-            #[cfg(feature = "external-sources")]
-            (Source::Path(path), _) => {
-                config.find_template(path, None, None, Some(source_span.config_span()))?
-            }
+        let path = match (&source, &ext) {
+            (Source::Path(path), _) => config.find_template(path, None, None)?,
             (&Source::Source(_), Some(ext)) => {
                 PathBuf::from(format!("{}.{}", ast.ident, ext)).into()
             }
@@ -115,7 +115,7 @@ impl TemplateInput<'_> {
         let empty_punctuated = Punctuated::new();
         let fields = match ast.data {
             syn::Data::Struct(ref struct_) => {
-                if let syn::Fields::Named(fields) = &struct_.fields {
+                if let syn::Fields::Named(ref fields) = &struct_.fields {
                     &fields.named
                 } else {
                     &empty_punctuated
@@ -132,14 +132,14 @@ impl TemplateInput<'_> {
         .collect::<Vec<_>>();
 
         Ok(TemplateInput {
-            template_span: *template_span,
             ast,
             enum_ast,
             config,
             syntax,
             source,
-            source_span: source_span.clone(),
+            source_span: *source_span,
             block: block.as_ref().map(|(block, span)| (block.as_str(), *span)),
+            #[cfg(feature = "blocks")]
             blocks: blocks.as_slice(),
             print: *print,
             escaper,
@@ -150,27 +150,17 @@ impl TemplateInput<'_> {
 
     pub(crate) fn find_used_templates(
         &self,
-        map: &mut HashMap<Arc<Path>, Arc<Parsed>>,
+        map: &mut HashMap<Arc<Path>, Arc<Parsed>, FxBuildHasher>,
     ) -> Result<(), CompileError> {
         let (source, source_path) = match &self.source {
             Source::Source(s) => (s.clone(), None),
-            #[cfg(feature = "external-sources")]
-            Source::Path(p) => (
-                get_template_source(&self.path, p.as_ref(), None)?,
+            Source::Path(_) => (
+                get_template_source(&self.path, None)?,
                 Some(Arc::clone(&self.path)),
             ),
         };
 
-        #[cfg(feature = "external-sources")]
         let mut dependency_graph = Vec::new();
-
-        #[cfg(feature = "external-sources")]
-        let mut original_paths: HashMap<Arc<Path>, String> = HashMap::default();
-        #[cfg(feature = "external-sources")]
-        if let Source::Path(p) = &self.source {
-            original_paths.insert(Arc::clone(&self.path), p.to_string());
-        }
-
         let mut check = vec![(Arc::clone(&self.path), source, source_path)];
         while let Some((path, source, source_path)) = check.pop() {
             let parsed = match self.syntax.parse(Arc::clone(&source), source_path) {
@@ -193,18 +183,14 @@ impl TemplateInput<'_> {
             let mut nested = vec![parsed.nodes()];
             while let Some(nodes) = nested.pop() {
                 for n in nodes {
-                    #[cfg(feature = "external-sources")]
-                    let mut add_to_check = |new_path: Arc<Path>,
-                                            original_path: &str|
-                     -> Result<(), CompileError> {
-                        if let std::collections::hash_map::Entry::Vacant(e) = map.entry(new_path) {
+                    let mut add_to_check = |new_path: Arc<Path>| -> Result<(), CompileError> {
+                        if let Entry::Vacant(e) = map.entry(new_path) {
                             // Add a dummy entry to `map` in order to prevent adding `path`
                             // multiple times to `check`.
                             let new_path = e.key();
                             let source = parsed.source();
                             let source = get_template_source(
                                 new_path,
-                                original_path,
                                 Some((
                                     &path,
                                     source,
@@ -212,97 +198,50 @@ impl TemplateInput<'_> {
                                 )),
                             )?;
                             check.push((new_path.clone(), source, Some(new_path.clone())));
+                            e.insert(Arc::default());
                         }
                         Ok(())
                     };
 
-                    match &**n {
+                    match n {
                         Node::Extends(extends) if top => {
-                            #[cfg(not(feature = "external-sources"))]
-                            {
-                                return node_needs_external_sources(
-                                    "extends",
-                                    extends.span(),
-                                    &path,
-                                    &parsed,
-                                );
-                            }
-                            #[cfg(feature = "external-sources")]
-                            {
-                                let original_path = extends.path;
-                                let extends = self.config.find_template(
-                                    original_path,
-                                    Some(&path),
-                                    Some(FileInfo::of(extends.span(), &path, &parsed)),
-                                    Some(self.source_span.config_span()),
-                                )?;
-                                original_paths
-                                    .insert(Arc::clone(&extends), original_path.to_owned());
-                                let dependency_path = (path.clone(), extends.clone());
-                                if path == extends {
-                                    // We add the path into the graph to have a better looking error.
-                                    dependency_graph.push(dependency_path);
-                                    return cyclic_graph_error(&dependency_graph, &original_paths);
-                                } else if dependency_graph.contains(&dependency_path) {
-                                    return cyclic_graph_error(&dependency_graph, &original_paths);
-                                }
+                            let extends = self.config.find_template(
+                                extends.path,
+                                Some(&path),
+                                Some(FileInfo::of(extends.span(), &path, &parsed)),
+                            )?;
+                            let dependency_path = (path.clone(), extends.clone());
+                            if path == extends {
+                                // We add the path into the graph to have a better looking error.
                                 dependency_graph.push(dependency_path);
-                                add_to_check(extends, original_path)?;
+                                return cyclic_graph_error(&dependency_graph);
+                            } else if dependency_graph.contains(&dependency_path) {
+                                return cyclic_graph_error(&dependency_graph);
                             }
+                            dependency_graph.push(dependency_path);
+                            add_to_check(extends)?;
                         }
                         Node::Macro(m) if top => {
                             nested.push(&m.nodes);
                         }
                         Node::Import(import) if top => {
-                            #[cfg(not(feature = "external-sources"))]
-                            {
-                                return node_needs_external_sources(
-                                    "import",
-                                    import.span(),
-                                    &path,
-                                    &parsed,
-                                );
-                            }
-                            #[cfg(feature = "external-sources")]
-                            {
-                                let original_path = import.path;
-                                let import = self.config.find_template(
-                                    original_path,
-                                    Some(&path),
-                                    Some(FileInfo::of(import.span(), &path, &parsed)),
-                                    Some(self.source_span.config_span()),
-                                )?;
-                                original_paths
-                                    .insert(Arc::clone(&import), original_path.to_owned());
-                                add_to_check(import, original_path)?;
-                            }
+                            let import = self.config.find_template(
+                                import.path,
+                                Some(&path),
+                                Some(FileInfo::of(import.span(), &path, &parsed)),
+                            )?;
+                            add_to_check(import)?;
                         }
                         Node::FilterBlock(f) => {
                             nested.push(&f.nodes);
                         }
                         Node::Include(include) => {
-                            #[cfg(not(feature = "external-sources"))]
-                            {
-                                return node_needs_external_sources(
-                                    "include",
-                                    include.span(),
-                                    &path,
-                                    &parsed,
-                                );
-                            }
-                            #[cfg(feature = "external-sources")]
-                            {
-                                let original_path = include.path;
-                                let include = self.config.find_template(
-                                    original_path,
-                                    Some(&path),
-                                    Some(FileInfo::of(include.span(), &path, &parsed)),
-                                    Some(self.source_span.config_span()),
-                                )?;
-                                original_paths
-                                    .insert(Arc::clone(&include), original_path.to_owned());
-                                add_to_check(include, original_path)?;
-                            }
+                            let include = self.config.find_template(
+                                include.path,
+                                Some(&path),
+                                Some(FileInfo::of(include.span(), &path, &parsed)),
+                            )?;
+                            add_to_check(include)?;
                         }
                         Node::BlockDef(b) => {
                             nested.push(&b.nodes);
@@ -321,16 +260,12 @@ impl TemplateInput<'_> {
                                 nested.push(&arm.nodes);
                             }
                         }
-                        Node::Call(c) => {
-                            nested.push(&c.nodes);
-                        }
                         Node::Lit(_)
                         | Node::Comment(_)
                         | Node::Expr(_, _)
+                        | Node::Call(_)
                         | Node::Extends(_)
                         | Node::Let(_)
-                        | Node::Compound(_)
-                        | Node::Declare(_)
                         | Node::Import(_)
                         | Node::Macro(_)
                         | Node::Raw(_)
@@ -344,19 +279,6 @@ impl TemplateInput<'_> {
         }
         Ok(())
     }
-}
-
-#[cfg(not(feature = "external-sources"))]
-fn node_needs_external_sources(
-    kind: &str,
-    node: parser::Span,
-    path: &Path,
-    parsed: &Parsed,
-) -> Result<(), CompileError> {
-    Err(CompileError::new(
-        format!("enable feature `external-sources` to use `{{% {kind} %}}`"),
-        Some(FileInfo::of(node, path, parsed)),
-    ))
 }
 
 pub(crate) enum AnyTemplateArgs {
@@ -429,14 +351,16 @@ impl AnyTemplateArgs {
     }
 }
 
+#[cfg(feature = "blocks")]
 pub(crate) struct Block {
     pub(crate) name: String,
+    pub(crate) span: Span,
 }
 
 pub(crate) struct TemplateArgs {
-    template_span: Span,
-    pub(crate) source: (Source, SourceSpan),
+    pub(crate) source: (Source, Option<Span>),
     block: Option<(String, Span)>,
+    #[cfg(feature = "blocks")]
     blocks: Vec<Block>,
     print: Print,
     escaping: Option<String>,
@@ -446,6 +370,7 @@ pub(crate) struct TemplateArgs {
     config: Option<String>,
     crate_name: Option<ExprPath>,
     pub(crate) whitespace: Option<Whitespace>,
+    pub(crate) template_span: Option<Span>,
     pub(crate) config_span: Option<Span>,
 }
 
@@ -466,37 +391,34 @@ impl TemplateArgs {
             ));
         };
         Ok(Self {
-            template_span: args.template_span,
             source: match args.source {
-                #[cfg(feature = "external-sources")]
                 Some(PartialTemplateArgsSource::Path(s)) => {
-                    (Source::Path(s.value().into()), SourceSpan::from_path(s)?)
+                    (Source::Path(s.value().into()), Some(s.span()))
                 }
                 Some(PartialTemplateArgsSource::Source(s)) => {
-                    let (source, span) = SourceSpan::from_source(s)?;
-                    (Source::Source(source.into()), span)
+                    (Source::Source(s.value().into()), Some(s.span()))
                 }
                 #[cfg(feature = "code-in-doc")]
-                Some(PartialTemplateArgsSource::InDoc(span, source)) => {
-                    (source, SourceSpan::CodeInDoc(span))
-                }
+                Some(PartialTemplateArgsSource::InDoc(span, source)) => (source, Some(span)),
                 None => {
                     return Err(CompileError::no_file_info(
                         #[cfg(not(feature = "code-in-doc"))]
                         "specify one template argument `path` or `source`",
                         #[cfg(feature = "code-in-doc")]
                         "specify one template argument `path`, `source` or `in_doc`",
-                        Some(args.template_span),
+                        Some(args.template.span()),
                     ));
                 }
             },
             block: args.block.map(|value| (value.value(), value.span())),
+            #[cfg(feature = "blocks")]
             blocks: args
                 .blocks
                 .unwrap_or_default()
                 .into_iter()
                 .map(|value| Block {
                     name: value.value(),
+                    span: value.span(),
                 })
                 .collect(),
             print: args.print.unwrap_or_default(),
@@ -507,15 +429,16 @@ impl TemplateArgs {
             config: args.config.as_ref().map(|value| value.value()),
             crate_name: args.crate_name,
             whitespace: args.whitespace,
+            template_span: Some(args.template.span()),
             config_span: args.config.as_ref().map(|value| value.span()),
         })
     }
 
     pub(crate) fn fallback() -> Self {
         Self {
-            template_span: Span::call_site(),
-            source: (Source::Source("".into()), SourceSpan::empty()),
+            source: (Source::Source("".into()), None),
             block: None,
+            #[cfg(feature = "blocks")]
             blocks: vec![],
             print: Print::default(),
             escaping: None,
@@ -525,6 +448,7 @@ impl TemplateArgs {
             config: None,
             crate_name: None,
             whitespace: None,
+            template_span: None,
             config_span: None,
         }
     }
@@ -661,12 +585,13 @@ fn collect_askama_code_blocks(
     let mut had_askama_code = false;
     for e in Parser::new(&source) {
         match (in_askama_code, e) {
-            (false, Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(s))))
+            (false, Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(s)))) => {
                 if s.split(",")
-                    .any(|s| JINJA_EXTENSIONS.contains(&s.trim_ascii())) =>
-            {
-                in_askama_code = true;
-                had_askama_code = true;
+                    .any(|s| JINJA_EXTENSIONS.contains(&s.trim_ascii()))
+                {
+                    in_askama_code = true;
+                    had_askama_code = true;
+                }
             }
             (true, Event::End(TagEnd::CodeBlock)) => in_askama_code = false,
             (true, Event::Text(text)) => tmpl_source.push_str(&text),
@@ -683,20 +608,48 @@ fn collect_askama_code_blocks(
     Ok(Source::Source(tmpl_source.into()))
 }
 
+struct ResultIter<I, E>(Result<I, Option<E>>);
+
+impl<I: IntoIterator, E> From<Result<I, E>> for ResultIter<I::IntoIter, E> {
+    fn from(value: Result<I, E>) -> Self {
+        Self(match value {
+            Ok(i) => Ok(i.into_iter()),
+            Err(e) => Err(Some(e)),
+        })
+    }
+}
+
+impl<I: Iterator, E> Iterator for ResultIter<I, E> {
+    type Item = Result<I::Item, E>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.0 {
+            Ok(iter) => Some(Ok(iter.next()?)),
+            Err(err) => Some(Err(err.take()?)),
+        }
+    }
+}
+
+impl<I: FusedIterator, E> FusedIterator for ResultIter<I, E> {}
+
 #[derive(Debug, Clone, Hash, PartialEq)]
 pub(crate) enum Source {
-    #[cfg(feature = "external-sources")]
     Path(Arc<str>),
     Source(Arc<str>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Hash)]
 pub(crate) enum Print {
     All,
     Ast,
     Code,
-    #[default]
     None,
+}
+
+impl Default for Print {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 impl FromStr for Print {
@@ -713,64 +666,50 @@ impl FromStr for Print {
     }
 }
 
-#[cfg(feature = "external-sources")]
-fn cyclic_graph_error(
-    dependency_graph: &[(Arc<Path>, Arc<Path>)],
-    original_paths: &HashMap<Arc<Path>, String>,
-) -> Result<(), CompileError> {
-    let fmt_path = |p: &Arc<Path>| match original_paths.get(p) {
-        Some(orig) => format!("{orig:#?} (absolute path: {:#?})", p.display()),
-        None => format!("{:#?}", p.display()),
-    };
+fn cyclic_graph_error(dependency_graph: &[(Arc<Path>, Arc<Path>)]) -> Result<(), CompileError> {
     Err(CompileError::no_file_info(
         format_args!(
             "cyclic dependency in graph {:#?}",
             dependency_graph
                 .iter()
-                .map(|e| format!("{} --> {}", fmt_path(&e.0), fmt_path(&e.1)))
+                .map(|e| format!("{:#?} --> {:#?}", e.0, e.1))
                 .collect::<Vec<String>>()
         ),
         None,
     ))
 }
 
-#[cfg(feature = "external-sources")]
 pub(crate) fn get_template_source(
     tpl_path: &Arc<Path>,
-    original_path: &str,
     import_from: Option<(&Arc<Path>, &str, &str)>,
 ) -> Result<Arc<str>, CompileError> {
-    static CACHE: std::sync::OnceLock<crate::OnceMap<Arc<Path>, Arc<str>>> =
-        std::sync::OnceLock::new();
+    static CACHE: OnceLock<OnceMap<Arc<Path>, Arc<str>>> = OnceLock::new();
 
-    CACHE
-        .get_or_init(crate::OnceMap::default)
-        .get_or_try_insert(
-            tpl_path,
-            |tpl_path| match std::fs::read_to_string(tpl_path) {
-                Ok(mut source) => {
-                    if source.ends_with('\n') {
-                        let _ = source.pop();
-                    }
-                    Ok((Arc::clone(tpl_path), Arc::from(source)))
+    CACHE.get_or_init(OnceMap::default).get_or_try_insert(
+        tpl_path,
+        |tpl_path| match read_to_string(tpl_path) {
+            Ok(mut source) => {
+                if source.ends_with('\n') {
+                    let _ = source.pop();
                 }
-                Err(err) => Err(CompileError::new(
-                    format_args!(
-                        "unable to open template file '{}' (absolute path: '{}'): {err}",
-                        original_path,
-                        tpl_path.to_str().unwrap(),
-                    ),
-                    import_from.map(|(node_file, file_source, node_source)| {
-                        FileInfo::new(node_file, Some(file_source), Some(node_source))
-                    }),
-                )),
-            },
-            Arc::clone,
-        )
+                Ok((Arc::clone(tpl_path), Arc::from(source)))
+            }
+            Err(err) => Err(CompileError::new(
+                format_args!(
+                    "unable to open template file '{}': {err}",
+                    tpl_path.to_str().unwrap(),
+                ),
+                import_from.map(|(node_file, file_source, node_source)| {
+                    FileInfo::new(node_file, Some(file_source), Some(node_source))
+                }),
+            )),
+        },
+        Arc::clone,
+    )
 }
 
 pub(crate) struct PartialTemplateArgs {
-    pub(crate) template_span: Span,
+    pub(crate) template: Ident,
     pub(crate) source: Option<PartialTemplateArgsSource>,
     pub(crate) block: Option<LitStr>,
     pub(crate) print: Option<Print>,
@@ -780,12 +719,12 @@ pub(crate) struct PartialTemplateArgs {
     pub(crate) config: Option<LitStr>,
     pub(crate) whitespace: Option<Whitespace>,
     pub(crate) crate_name: Option<ExprPath>,
+    #[cfg(feature = "blocks")]
     pub(crate) blocks: Option<Vec<LitStr>>,
 }
 
 #[derive(Clone)]
 pub(crate) enum PartialTemplateArgsSource {
-    #[cfg(feature = "external-sources")]
     Path(LitStr),
     Source(LitStr),
     #[cfg(feature = "code-in-doc")]
@@ -795,7 +734,6 @@ pub(crate) enum PartialTemplateArgsSource {
 impl PartialTemplateArgsSource {
     pub(crate) fn span(&self) -> Span {
         match self {
-            #[cfg(feature = "external-sources")]
             Self::Path(s) => s.span(),
             Self::Source(s) => s.span(),
             #[cfg(feature = "code-in-doc")]
@@ -824,7 +762,7 @@ const _: () = {
     ) -> Result<Option<PartialTemplateArgs>, CompileError> {
         // FIXME: implement once <https://github.com/rust-lang/rfcs/pull/3715> is stable
         if let syn::Data::Union(data) = &ast.data {
-            return Err(CompileError::new_with_span_stable(
+            return Err(CompileError::new_with_span(
                 "askama templates are not supported for `union` types, only `struct` and `enum`",
                 None,
                 Some(data.union_token.span),
@@ -835,7 +773,7 @@ const _: () = {
         let mut meta_docs = vec![];
 
         let mut this = PartialTemplateArgs {
-            template_span: Span::call_site(),
+            template: Ident::new("template", Span::call_site()),
             source: None,
             block: None,
             print: None,
@@ -845,6 +783,7 @@ const _: () = {
             config: None,
             whitespace: None,
             crate_name: None,
+            #[cfg(feature = "blocks")]
             blocks: None,
         };
         let mut has_data = false;
@@ -854,7 +793,7 @@ const _: () = {
                 continue;
             };
             if ident == "template" {
-                this.template_span = ident.span();
+                this.template = ident.clone();
                 has_data = true;
             } else {
                 #[cfg(feature = "code-in-doc")]
@@ -869,7 +808,7 @@ const _: () = {
                 .map_err(|e| {
                     CompileError::no_file_info(
                         format_args!("unable to parse template arguments: {e}"),
-                        Some(e.span()),
+                        Some(attr.path().span()),
                     )
                 })?;
             for arg in args {
@@ -899,41 +838,37 @@ const _: () = {
                     this.crate_name = Some(get_exprpath(ident, pair.value)?);
                     continue;
                 } else if ident == "blocks" {
-                    if is_enum_variant {
+                    if !cfg!(feature = "blocks") {
+                        return Err(CompileError::no_file_info(
+                            "enable feature `blocks` to use `blocks` argument",
+                            Some(ident.span()),
+                        ));
+                    } else if is_enum_variant {
                         return Err(CompileError::no_file_info(
                             "template attribute `blocks` can only be used on the `enum`, \
                             not its variants",
                             Some(ident.span()),
                         ));
                     }
-                    ensure_only_once(ident, &mut this.blocks)?;
-                    this.blocks = Some(
-                        get_exprarray(ident, pair.value)?
-                            .elems
-                            .into_iter()
-                            .map(|value| get_strlit(ident, get_lit(ident, value)?))
-                            .collect::<Result<_, _>>()?,
-                    );
-                    continue;
+                    #[cfg(feature = "blocks")]
+                    {
+                        ensure_only_once(ident, &mut this.blocks)?;
+                        this.blocks = Some(
+                            get_exprarray(ident, pair.value)?
+                                .elems
+                                .into_iter()
+                                .map(|value| get_strlit(ident, get_lit(ident, value)?))
+                                .collect::<Result<_, _>>()?,
+                        );
+                        continue;
+                    }
                 }
 
                 let value = get_lit(ident, pair.value)?;
 
                 if ident == "path" {
                     ensure_source_only_once(ident, &this.source)?;
-
-                    #[cfg(not(feature = "external-sources"))]
-                    {
-                        return Err(CompileError::no_file_info(
-                            "enable feature `external-sources` to use `path` argument",
-                            Some(ident.span()),
-                        ));
-                    }
-                    #[cfg(feature = "external-sources")]
-                    {
-                        this.source =
-                            Some(PartialTemplateArgsSource::Path(get_strlit(ident, value)?));
-                    }
+                    this.source = Some(PartialTemplateArgsSource::Path(get_strlit(ident, value)?));
                 } else if ident == "source" {
                     ensure_source_only_once(ident, &this.source)?;
                     this.source =
@@ -956,7 +891,7 @@ const _: () = {
                     {
                         this.source = Some(PartialTemplateArgsSource::InDoc(
                             value.span(),
-                            Source::Source("".into()),
+                            Source::Path("".into()),
                         ));
                     }
                 } else if ident == "block" {
@@ -1086,6 +1021,7 @@ const _: () = {
         }
     }
 
+    #[cfg(feature = "blocks")]
     fn get_exprarray(name: &Ident, mut expr: Expr) -> Result<syn::ExprArray, CompileError> {
         loop {
             match expr {
@@ -1122,13 +1058,9 @@ const _: () = {
 const JINJA_EXTENSIONS: &[&str] = &["askama", "j2", "jinja", "jinja2", "rinja"];
 
 #[test]
-#[cfg(feature = "external-sources")]
 fn get_source() {
     let path = Config::new("", None, None, None, None)
-        .and_then(|config| config.find_template("b.html", None, None, None))
+        .and_then(|config| config.find_template("b.html", None, None))
         .unwrap();
-    assert_eq!(
-        get_template_source(&path, "test.html", None).unwrap(),
-        "bar".into()
-    );
+    assert_eq!(get_template_source(&path, None).unwrap(), "bar".into());
 }

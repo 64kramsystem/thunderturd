@@ -24,7 +24,7 @@ pub struct UnicodeRange {
 
 impl UnicodeRange {
     /// https://drafts.csswg.org/css-syntax/#urange-syntax
-    pub fn parse(input: &mut Parser) -> Result<Self, BasicParseError> {
+    pub fn parse<'i>(input: &mut Parser<'i, '_>) -> Result<Self, BasicParseError<'i>> {
         // <urange> =
         //   u '+' <ident-token> '?'* |
         //   u <dimension-token> '?'* |
@@ -44,23 +44,29 @@ impl UnicodeRange {
 
         let range = match parse_concatenated(concatenated_tokens.as_bytes()) {
             Ok(range) => range,
-            Err(()) => return Err(BasicParseError::unexpected_token()),
+            Err(()) => {
+                return Err(input
+                    .new_basic_unexpected_token_error(Token::Ident(concatenated_tokens.into())))
+            }
         };
         if range.end > char::MAX as u32 || range.start > range.end {
-            Err(BasicParseError::unexpected_token())
+            Err(input.new_basic_unexpected_token_error(Token::Ident(concatenated_tokens.into())))
         } else {
             Ok(range)
         }
     }
 }
 
-fn parse_tokens(input: &mut Parser) -> Result<(), BasicParseError> {
-    match *input.next_including_whitespace()? {
+fn parse_tokens<'i>(input: &mut Parser<'i, '_>) -> Result<(), BasicParseError<'i>> {
+    match input.next_including_whitespace()?.clone() {
         Token::Delim('+') => {
             match *input.next_including_whitespace()? {
                 Token::Ident(_) => {}
                 Token::Delim('?') => {}
-                _ => return Err(BasicParseError::unexpected_token()),
+                ref t => {
+                    let t = t.clone();
+                    return Err(input.new_basic_unexpected_token_error(t));
+                }
             }
             parse_question_marks(input)
         }
@@ -74,7 +80,7 @@ fn parse_tokens(input: &mut Parser) -> Result<(), BasicParseError> {
                 _ => input.reset(&after_number),
             }
         }
-        _ => return Err(BasicParseError::unexpected_token()),
+        t => return Err(input.new_basic_unexpected_token_error(t)),
     }
     Ok(())
 }

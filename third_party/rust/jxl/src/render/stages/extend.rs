@@ -3,12 +3,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use crate::error::Result;
-use crate::frame::ReferenceFrame;
-use crate::headers::FileHeader;
-use crate::headers::extra_channels::ExtraChannelInfo;
-use crate::headers::frame_header::*;
-use crate::util::sync::Arc;
+use std::sync::Arc;
+
+use crate::{
+    error::Result,
+    frame::ReferenceFrame,
+    headers::{FileHeader, extra_channels::ExtraChannelInfo, frame_header::*},
+};
 
 /// Does not directly modify the current image pixels, but extends the current image with
 /// additional data.
@@ -86,12 +87,13 @@ impl ExtendToImageDimensionsStage {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use test_log::test;
 
     use super::*;
     use crate::error::Result;
-    use crate::tests::decode::read_headers_and_toc;
-    use crate::util::sync::Arc;
+    use crate::util::test::read_headers_and_toc;
 
     #[test]
     fn extend_consistency() -> Result<()> {

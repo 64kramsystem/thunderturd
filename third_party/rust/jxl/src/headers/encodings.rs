@@ -3,11 +3,12 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use super::frame_header::PermutationNonserialized;
-use super::permutation::Permutation;
-use crate::bit_reader::BitReader;
-use crate::entropy_coding::decode::{Histograms, SymbolReader, unpack_signed};
-use crate::error::Error;
+use super::{frame_header::PermutationNonserialized, permutation::Permutation};
+use crate::{
+    bit_reader::BitReader,
+    entropy_coding::decode::{Histograms, SymbolReader, unpack_signed},
+    error::Error,
+};
 
 pub enum U32 {
     Bits(usize),
@@ -205,17 +206,6 @@ impl<T: UnconditionalCoder<Config>, Config, const N: usize> UnconditionalCoder<C
     ) -> Result<[T; N], Error> {
         use array_init::try_array_init;
         try_array_init(|_| T::read_unconditional(config, br, nonserialized))
-    }
-}
-
-impl<Config, T: UnconditionalCoder<Config>> UnconditionalCoder<Config> for Box<T> {
-    type Nonserialized = T::Nonserialized;
-    fn read_unconditional(
-        config: &Config,
-        br: &mut BitReader,
-        nonserialized: &Self::Nonserialized,
-    ) -> Result<Box<T>, Error> {
-        Ok(Box::new(T::read_unconditional(config, br, nonserialized)?))
     }
 }
 

@@ -1,5 +1,3 @@
-use core::num::Saturating;
-
 /// Describes how a TOML string (key or value) should be formatted.
 ///
 /// # Example
@@ -340,22 +338,22 @@ impl ValueMetrics {
     fn calculate(s: &str) -> Self {
         let mut metrics = Self::new();
 
-        let mut prev_single_quotes = Saturating(0);
-        let mut prev_double_quotes = Saturating(0);
+        let mut prev_single_quotes = 0;
+        let mut prev_double_quotes = 0;
         for byte in s.as_bytes() {
             if *byte == b'\'' {
                 prev_single_quotes += 1;
                 metrics.max_seq_single_quotes =
-                    metrics.max_seq_single_quotes.max(prev_single_quotes.0);
+                    metrics.max_seq_single_quotes.max(prev_single_quotes);
             } else {
-                prev_single_quotes = Saturating(0);
+                prev_single_quotes = 0;
             }
             if *byte == b'"' {
                 prev_double_quotes += 1;
                 metrics.max_seq_double_quotes =
-                    metrics.max_seq_double_quotes.max(prev_double_quotes.0);
+                    metrics.max_seq_double_quotes.max(prev_double_quotes);
             } else {
-                prev_double_quotes = Saturating(0);
+                prev_double_quotes = 0;
             }
 
             // ```bnf

@@ -47,9 +47,5 @@ fn benchmark_decoder(c: &mut Criterion) {
     }
 }
 
-criterion_group! {
-    name = benches;
-    config = { neqo_common::log::init(None); Criterion::default() };
-    targets = benchmark_decoder
-}
+criterion_group!(benches, benchmark_decoder);
 criterion_main!(benches);

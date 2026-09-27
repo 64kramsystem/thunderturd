@@ -5,10 +5,8 @@
 
 use std::fmt::Debug;
 
+use crate::{error::Error, util::tracing_wrappers::*};
 use byteorder::{ByteOrder, LittleEndian};
-
-use crate::error::Error;
-use crate::util::tracing_wrappers::*;
 
 /// Reads bits from a sequence of bytes.
 #[derive(Clone)]

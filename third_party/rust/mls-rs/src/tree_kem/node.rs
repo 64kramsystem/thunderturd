@@ -22,7 +22,7 @@ pub(crate) const MAX_LEAF_INDEX: u32 = (1 << 24) - 1;
 
 #[derive(Clone, Debug, PartialEq, MlsSize, MlsEncode, MlsDecode)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct Parent {
+pub(crate) struct Parent {
     pub public_key: HpkePublicKey,
     pub parent_hash: ParentHash,
     pub unmerged_leaves: Vec<LeafIndex>,
@@ -105,14 +105,14 @@ impl<'de> serde::Deserialize<'de> for LeafIndex {
     }
 }
 
-pub type NodeIndex = u32;
+pub(crate) type NodeIndex = u32;
 
 #[derive(Clone, Debug, PartialEq, MlsSize, MlsEncode, MlsDecode)]
 #[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 //TODO: Research if this should actually be a Box<Leaf> for memory / performance reasons
-pub enum Node {
+pub(crate) enum Node {
     Leaf(LeafNode) = 1u8,
     Parent(Parent) = 2u8,
 }
@@ -202,7 +202,7 @@ impl NodeTypeResolver for Option<Node> {
 
 #[derive(Clone, Debug, PartialEq, MlsSize, MlsEncode, MlsDecode, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct NodeVec(Vec<Option<Node>>);
+pub(crate) struct NodeVec(Vec<Option<Node>>);
 
 impl From<Vec<Option<Node>>> for NodeVec {
     fn from(x: Vec<Option<Node>>) -> Self {

@@ -11,12 +11,11 @@
 
 [package]
 edition = "2021"
-rust-version = "1.88.0"
+rust-version = "1.68"
 name = "plist"
-version = "1.10.0"
+version = "1.7.2"
 authors = ["Ed Barnard <eabarnard@gmail.com>"]
 build = false
-exclude = ["/tests/data"]
 autolib = false
 autobins = false
 autoexamples = false
@@ -49,10 +48,6 @@ path = "src/lib.rs"
 name = "fuzzer"
 path = "tests/fuzzer.rs"
 
-[[test]]
-name = "macros"
-path = "tests/macros.rs"
-
 [dependencies.base64]
 version = "0.22.0"
 
@@ -60,7 +55,7 @@ version = "0.22.0"
 version = "2.1.0"
 
 [dependencies.quick_xml]
-version = "0.41.0"
+version = "0.37.4"
 package = "quick-xml"
 
 [dependencies.serde]
@@ -68,21 +63,14 @@ version = "1.0.2"
 optional = true
 
 [dependencies.time]
-version = "0.3.47"
+version = "0.3.30"
 features = [
     "parsing",
     "formatting",
 ]
-
-[dev-dependencies.macrotest]
-version = "1.2.1"
 
 [dev-dependencies.serde_derive]
 version = "1.0.2"
 
 [dev-dependencies.serde_yaml]
 version = "0.8.21"
-
-[dev-dependencies.trybuild]
-version = "1.0.116"
-features = ["diff"]

@@ -4,14 +4,17 @@
 
 use super::*;
 
-pub fn map_default_value(
-    default: initial::DefaultValue,
-    context: &Context,
-) -> Result<DefaultValue> {
-    Ok(match default {
-        initial::DefaultValue::Literal(lit) => DefaultValue::Literal(lit.map_node(context)?),
-        initial::DefaultValue::Default => {
-            DefaultValue::Default(context.current_arg_or_field_type()?)
+pub fn pass(namespace: &mut Namespace) -> Result<()> {
+    // fields and arguments need `DefaultValue` conversion.
+    namespace.visit_mut(|arg: &mut Argument| {
+        if let Some(DefaultValue::Default(ref mut type_node)) = arg.default {
+            *type_node = arg.ty.clone();
         }
-    })
+    });
+    namespace.visit_mut(|field: &mut Field| {
+        if let Some(DefaultValue::Default(ref mut type_node)) = field.default {
+            *type_node = field.ty.clone();
+        }
+    });
+    Ok(())
 }

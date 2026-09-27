@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2024"
-rust-version = "1.85"
+edition = "2018"
+rust-version = "1.53"
 name = "thin-vec"
-version = "0.2.20"
+version = "0.2.16"
 authors = ["Aria Beingessner <a.beingessner@gmail.com>"]
 build = false
 autolib = false
@@ -22,6 +22,7 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "A Vec that takes up less space on the stack."
+homepage = "https://github.com/mozilla/thin-vec"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mozilla/thin-vec"

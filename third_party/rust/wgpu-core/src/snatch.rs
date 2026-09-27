@@ -13,22 +13,20 @@ pub struct ExclusiveSnatchGuard<'a>(#[expect(dead_code)] RwLockWriteGuard<'a, ()
 /// In order to safely access the underlying data, the device's global snatchable
 /// lock must be taken. To guarantee it, methods take a read or write guard of that
 /// special lock.
-pub struct SnatchableInner<T> {
-    value: UnsafeCell<T>,
+pub struct Snatchable<T> {
+    value: UnsafeCell<Option<T>>,
 }
-
-pub type Snatchable<T> = SnatchableInner<Option<T>>;
 
 impl<T> Snatchable<T> {
     pub fn new(val: T) -> Self {
-        SnatchableInner {
+        Snatchable {
             value: UnsafeCell::new(Some(val)),
         }
     }
 
     #[allow(dead_code)]
     pub fn empty() -> Self {
-        SnatchableInner {
+        Snatchable {
             value: UnsafeCell::new(None),
         }
     }
@@ -54,13 +52,13 @@ impl<T> Snatchable<T> {
 
 // Can't safely print the contents of a snatchable object without holding
 // the lock.
-impl<T> fmt::Debug for SnatchableInner<T> {
+impl<T> fmt::Debug for Snatchable<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "<snatchable>")
     }
 }
 
-unsafe impl<T> Sync for SnatchableInner<T> {}
+unsafe impl<T> Sync for Snatchable<T> {}
 
 use trace::LockTrace;
 #[cfg(all(debug_assertions, feature = "std"))]

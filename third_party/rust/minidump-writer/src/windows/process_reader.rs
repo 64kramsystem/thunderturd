@@ -4,7 +4,6 @@ use {
     std::{
         convert::TryInto,
         ffi::OsString,
-        marker::PhantomData,
         mem::{MaybeUninit, size_of},
         os::windows::ffi::OsStringExt,
     },
@@ -12,9 +11,8 @@ use {
 
 pub type ProcessHandle = ffi::HANDLE;
 
-pub struct ProcessReader<'a> {
+pub struct ProcessReader {
     process: ProcessHandle,
-    phantom: PhantomData<&'a ()>,
 }
 
 #[derive(Debug, thiserror::Error, serde::Serialize)]
@@ -37,12 +35,9 @@ pub enum FindModuleError {
     ModuleListTooLarge,
 }
 
-impl ProcessReader<'_> {
-    pub fn new(process: ProcessHandle) -> ProcessReader<'static> {
-        ProcessReader {
-            process,
-            phantom: PhantomData,
-        }
+impl ProcessReader {
+    pub fn new(process: ProcessHandle) -> ProcessReader {
+        ProcessReader { process }
     }
 
     pub fn read(&self, src: usize, dst: &mut [u8]) -> Result<usize, CopyFromProcessError> {

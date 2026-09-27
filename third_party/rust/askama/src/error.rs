@@ -251,7 +251,6 @@ impl From<Infallible> for Error {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 const _: () = {
     trait AssertSendSyncStatic: Send + Sync + 'static {}
     impl AssertSendSyncStatic for Error {}

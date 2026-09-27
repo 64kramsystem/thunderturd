@@ -76,8 +76,8 @@
 //! [`RawWaker`]: https://doc.rust-lang.org/std/task/struct.RawWaker.html
 
 use super::{
-    FutureLowerReturn, RustFutureCallback, RustFutureContinuationBoundCallback, RustFuturePoll,
-    Scheduler, UniffiCompatibleFuture,
+    FutureLowerReturn, RustFutureContinuationCallback, RustFuturePoll, Scheduler,
+    UniffiCompatibleFuture,
 };
 use crate::{try_rust_call, FfiDefault, LiftArgsError, RustCallResult, RustCallStatus};
 use std::{
@@ -180,29 +180,26 @@ impl<FfiType> WrappedFuture<FfiType> {
 }
 
 /// Future that the foreign code is awaiting
-pub struct RustFuture<FfiType, Callback = RustFutureContinuationBoundCallback> {
+pub(super) struct RustFuture<FfiType> {
     // This Mutex should never block if our code is working correctly, since there should not be
     // multiple threads calling [Self::poll] and/or [Self::complete] at the same time.
     future: Mutex<WrappedFuture<FfiType>>,
-    scheduler: Scheduler<Callback>,
+    scheduler: Mutex<Scheduler>,
 }
 
-impl<FfiType, Callback> RustFuture<FfiType, Callback>
-where
-    Callback: RustFutureCallback,
-{
-    pub fn new<F, T, UT>(future: F, _tag: UT) -> Self
+impl<FfiType> RustFuture<FfiType> {
+    pub(super) fn new<F, T, UT>(future: F, _tag: UT) -> Self
     where
         F: UniffiCompatibleFuture<Result<T, LiftArgsError>> + 'static,
         T: FutureLowerReturn<UT, ReturnType = FfiType>,
     {
         Self {
             future: Mutex::new(WrappedFuture::new(future)),
-            scheduler: Scheduler::new(),
+            scheduler: Mutex::new(Scheduler::new()),
         }
     }
 
-    pub fn poll(self: Arc<Self>, callback: Callback) {
+    pub(super) fn poll(self: Arc<Self>, callback: RustFutureContinuationCallback, data: u64) {
         let cancelled = self.is_cancelled();
         let ready = cancelled || {
             let mut locked = self.future.lock().unwrap();
@@ -211,40 +208,39 @@ where
         };
         if ready {
             trace!("RustFuture::poll is ready (cancelled: {cancelled})");
-            callback.invoke(RustFuturePoll::Ready)
+            callback(data, RustFuturePoll::Ready)
         } else {
-            self.scheduler.store(callback);
+            self.scheduler.lock().unwrap().store(callback, data);
         }
     }
 
-    pub fn is_cancelled(&self) -> bool {
-        self.scheduler.is_cancelled()
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.scheduler.lock().unwrap().is_cancelled()
     }
 
-    pub fn cancel(&self) {
-        self.scheduler.cancel();
+    pub(super) fn cancel(&self) {
+        self.scheduler.lock().unwrap().cancel();
     }
 
-    pub fn complete(&self, call_status: &mut RustCallStatus) -> FfiType
+    pub(super) fn complete(&self, call_status: &mut RustCallStatus) -> FfiType
     where
         FfiType: FfiDefault,
     {
         self.future.lock().unwrap().complete(call_status)
     }
 
-    pub fn free(&self) {
+    pub(super) fn free(self: Arc<Self>) {
         // Call cancel() to send any leftover data to the continuation callback
-        self.scheduler.cancel();
+        self.scheduler.lock().unwrap().cancel();
         // Ensure we drop our inner future, releasing all held references
         self.future.lock().unwrap().free();
     }
 }
 
 // `RawWaker` implementation for RustFuture
-impl<FfiType, Callback> RustFuture<FfiType, Callback>
+impl<FfiType> RustFuture<FfiType>
 where
     Scheduler: Send + Sync,
-    Callback: RustFutureCallback,
 {
     unsafe fn waker_clone(ptr: *const ()) -> RawWaker {
         trace!("RustFuture::waker_clone called ({ptr:?})");
@@ -262,7 +258,7 @@ where
 
     unsafe fn waker_wake(ptr: *const ()) {
         trace!("RustFuture::waker_wake called ({ptr:?})");
-        Self::recreate_arc(ptr).scheduler.wake();
+        Self::recreate_arc(ptr).scheduler.lock().unwrap().wake();
     }
 
     unsafe fn waker_wake_by_ref(ptr: *const ()) {
@@ -270,7 +266,7 @@ where
         // For wake_by_ref, we can use the pointer directly, without consuming it to re-create the
         // arc.
         let ptr = ptr.cast::<Self>();
-        (*ptr).scheduler.wake();
+        (*ptr).scheduler.lock().unwrap().wake();
     }
 
     unsafe fn waker_drop(ptr: *const ()) {

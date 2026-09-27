@@ -125,7 +125,7 @@ impl ConstructorSet {
 }
 
 /// The sizes a member of [`ConstructorSet`] might have.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub enum ConstructorSize {
     /// The constructor is [`SCALAR`].
     ///

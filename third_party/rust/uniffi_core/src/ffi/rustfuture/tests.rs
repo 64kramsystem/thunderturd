@@ -86,12 +86,7 @@ fn channel() -> (Sender, Arc<RustFuture<RustBuffer>>) {
 fn poll(rust_future: &Arc<RustFuture<RustBuffer>>) -> Arc<OnceCell<RustFuturePoll>> {
     let cell = Arc::new(OnceCell::new());
     let handle = Arc::into_raw(cell.clone()) as u64;
-    rust_future
-        .clone()
-        .poll(RustFutureContinuationBoundCallback {
-            callback: poll_continuation,
-            data: handle,
-        });
+    rust_future.clone().poll(poll_continuation, handle);
     cell
 }
 

@@ -218,7 +218,6 @@ impl FunctionTracer<'_> {
             }
             Qf::ConfirmIntersection => {}
             Qf::Terminate => {}
-            Qf::Begin => {}
         }
     }
 }
@@ -457,7 +456,6 @@ impl FunctionMap {
             }
             Qf::ConfirmIntersection => {}
             Qf::Terminate => {}
-            Qf::Begin => {}
         }
     }
 }

@@ -76,7 +76,7 @@ mod tests {
             1000,
             200,
             1500,
-            CongestionTrigger::Loss(1),
+            CongestionTrigger::Loss,
             &mut CongestionControlStats::default(),
         );
         assert_eq!(cwnd, 500);

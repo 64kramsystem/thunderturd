@@ -100,7 +100,7 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "SPV_KHR_fragment_shader_barycentric",
 ];
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct Instruction {
     op: spirv::Op,
     wc: u16,
@@ -608,7 +608,6 @@ enum SignAnchor {
     Operand,
 }
 
-#[expect(missing_debug_implementations, reason = "would be way too verbose?")]
 pub struct Frontend<I> {
     data: I,
     data_offset: usize,
@@ -1817,7 +1816,7 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
             let mut nodes = petgraph::algo::toposort(&self.function_call_graph, None)
                 .map_err(|cycle| Error::FunctionCallCycle(cycle.node_id()))?;
             nodes.reverse(); // we need dominated first
-            let mut functions = module.functions.take();
+            let mut functions = mem::take(&mut module.functions);
             for fun_id in nodes {
                 if fun_id > !(functions.len() as u32) {
                     // skip all the fake IDs registered for the entry points

@@ -52,8 +52,7 @@ impl ::std::convert::AsRef<DeviceCollectionRef> for DeviceCollection<'_> {
     }
 }
 
-#[repr(transparent)]
-pub struct DeviceCollectionRef(ffi_types::Opaque<CType>);
+pub struct DeviceCollectionRef(ffi_types::Opaque);
 
 impl DeviceCollectionRef {
     /// # Safety
@@ -76,13 +75,13 @@ impl DeviceCollectionRef {
 
     #[inline]
     pub fn as_ptr(&self) -> *mut CType {
-        self.0.get().cast()
+        self as *const _ as *mut _
     }
 }
 
 impl ::std::fmt::Debug for DeviceCollectionRef {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        let ptr = self.0.get() as usize;
+        let ptr = self as *const DeviceCollectionRef as usize;
         f.debug_tuple(stringify!(DeviceCollectionRef))
             .field(&ptr)
             .finish()

@@ -14,7 +14,7 @@ use std::ops::Range;
 ///
 /// Can be used with the `Parser::reset` method to restore that state.
 /// Should only be used with the `Parser` instance it came from.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ParserState {
     pub(crate) position: usize,
     pub(crate) current_line_start_position: usize,
@@ -63,37 +63,29 @@ pub enum ParseUntilErrorBehavior {
 
 /// Details about a `BasicParseError`
 #[derive(Clone, Debug, PartialEq)]
-pub enum BasicParseErrorKind {
+pub enum BasicParseErrorKind<'i> {
     /// An unexpected token was encountered.
-    ///
-    /// The token itself is deliberately not stored: it made this enum 32 bytes,
-    /// which pushed `Result<&Token, BasicParseError>` (returned from every token
-    /// fetch) to 40 bytes and therefore out of registers and into memory.
-    /// Callers that want to name the token can recover it from the source text
-    /// they already carry for the error message.
-    UnexpectedToken,
+    UnexpectedToken(Token<'i>),
     /// The end of the input was encountered unexpectedly.
     EndOfInput,
-    /// An `@` rule was encountered that was invalid. See `UnexpectedToken` for
-    /// why the rule name is not stored.
-    AtRuleInvalid,
+    /// An `@` rule was encountered that was invalid.
+    AtRuleInvalid(CowRcStr<'i>),
     /// The body of an '@' rule was invalid.
     AtRuleBodyInvalid,
     /// A qualified rule was encountered that was invalid.
     QualifiedRuleInvalid,
-    /// We've gone over the nesting limit.
-    TooManyNestedBlocks,
 }
 
-impl fmt::Display for BasicParseErrorKind {
+impl fmt::Display for BasicParseErrorKind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BasicParseErrorKind::TooManyNestedBlocks => {
-                write!(f, "nesting block limit reached")
+            BasicParseErrorKind::UnexpectedToken(token) => {
+                write!(f, "unexpected token: {token:?}")
             }
-            BasicParseErrorKind::UnexpectedToken => write!(f, "unexpected token"),
             BasicParseErrorKind::EndOfInput => write!(f, "unexpected end of input"),
-            BasicParseErrorKind::AtRuleInvalid => write!(f, "invalid @ rule encountered"),
+            BasicParseErrorKind::AtRuleInvalid(rule) => {
+                write!(f, "invalid @ rule encountered: '@{rule}'")
+            }
             BasicParseErrorKind::AtRuleBodyInvalid => write!(f, "invalid @ rule body encountered"),
             BasicParseErrorKind::QualifiedRuleInvalid => {
                 write!(f, "invalid qualified rule encountered")
@@ -104,46 +96,76 @@ impl fmt::Display for BasicParseErrorKind {
 
 /// The fundamental parsing errors that can be triggered by built-in parsing routines.
 #[derive(Clone, Debug, PartialEq)]
-pub struct BasicParseError {
+pub struct BasicParseError<'i> {
     /// Details of this error
-    pub kind: BasicParseErrorKind,
+    pub kind: BasicParseErrorKind<'i>,
+    /// Location where this error occurred
+    pub location: SourceLocation,
 }
 
-impl BasicParseError {
-    /// Create a new BasicParseError of the given kind.
+impl<'i, T> From<BasicParseError<'i>> for ParseError<'i, T> {
     #[inline]
-    pub fn new(kind: BasicParseErrorKind) -> Self {
-        Self { kind }
-    }
-
-    /// Create a new BasicParseError for an unexpected token.
-    #[inline]
-    pub fn unexpected_token() -> Self {
-        Self::new(BasicParseErrorKind::UnexpectedToken)
-    }
-}
-
-impl<T> From<BasicParseError> for ParseError<T> {
-    #[inline]
-    fn from(this: BasicParseError) -> ParseError<T> {
+    fn from(this: BasicParseError<'i>) -> ParseError<'i, T> {
         ParseError {
             kind: ParseErrorKind::Basic(this.kind),
+            location: this.location,
+        }
+    }
+}
+
+impl SourceLocation {
+    /// Create a new BasicParseError at this location for an unexpected token
+    #[inline]
+    pub fn new_basic_unexpected_token_error(self, token: Token<'_>) -> BasicParseError<'_> {
+        self.new_basic_error(BasicParseErrorKind::UnexpectedToken(token))
+    }
+
+    /// Create a new BasicParseError at this location
+    #[inline]
+    pub fn new_basic_error(self, kind: BasicParseErrorKind<'_>) -> BasicParseError<'_> {
+        BasicParseError {
+            kind,
+            location: self,
+        }
+    }
+
+    /// Create a new ParseError at this location for an unexpected token
+    #[inline]
+    pub fn new_unexpected_token_error<E>(self, token: Token<'_>) -> ParseError<'_, E> {
+        self.new_error(BasicParseErrorKind::UnexpectedToken(token))
+    }
+
+    /// Create a new basic ParseError at the current location
+    #[inline]
+    pub fn new_error<E>(self, kind: BasicParseErrorKind<'_>) -> ParseError<'_, E> {
+        ParseError {
+            kind: ParseErrorKind::Basic(kind),
+            location: self,
+        }
+    }
+
+    /// Create a new custom ParseError at this location
+    #[inline]
+    pub fn new_custom_error<'i, E1: Into<E2>, E2>(self, error: E1) -> ParseError<'i, E2> {
+        ParseError {
+            kind: ParseErrorKind::Custom(error.into()),
+            location: self,
         }
     }
 }
 
 /// Details of a `ParseError`
 #[derive(Clone, Debug, PartialEq)]
-pub enum ParseErrorKind<T> {
+pub enum ParseErrorKind<'i, T: 'i> {
     /// A fundamental parse error from a built-in parsing routine.
-    Basic(BasicParseErrorKind),
+    Basic(BasicParseErrorKind<'i>),
     /// A parse error reported by downstream consumer code.
     Custom(T),
 }
 
-impl<T> ParseErrorKind<T> {
+impl<'i, T> ParseErrorKind<'i, T> {
     /// Like `std::convert::Into::into`
-    pub fn into<U>(self) -> ParseErrorKind<U>
+    pub fn into<U>(self) -> ParseErrorKind<'i, U>
     where
         T: Into<U>,
     {
@@ -154,89 +176,92 @@ impl<T> ParseErrorKind<T> {
     }
 }
 
-impl<E: fmt::Display> fmt::Display for ParseErrorKind<E> {
+impl<E: fmt::Display> fmt::Display for ParseErrorKind<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ParseErrorKind::Basic(basic) => basic.fmt(f),
-            ParseErrorKind::Custom(custom) => custom.fmt(f),
+            ParseErrorKind::Basic(ref basic) => basic.fmt(f),
+            ParseErrorKind::Custom(ref custom) => custom.fmt(f),
         }
     }
 }
 
 /// Extensible parse errors that can be encountered by client parsing implementations.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ParseError<E> {
+pub struct ParseError<'i, E> {
     /// Details of this error
-    pub kind: ParseErrorKind<E>,
+    pub kind: ParseErrorKind<'i, E>,
+    /// Location where this error occurred
+    pub location: SourceLocation,
 }
 
-impl<T> ParseError<T> {
-    /// Create a new ParseError from a basic error kind.
-    #[inline]
-    pub fn from_basic_kind(kind: BasicParseErrorKind) -> Self {
-        Self {
-            kind: ParseErrorKind::Basic(kind),
-        }
-    }
-
-    /// Create a new ParseError for an unexpected token.
-    #[inline]
-    pub fn unexpected_token() -> Self {
-        Self::from_basic_kind(BasicParseErrorKind::UnexpectedToken)
-    }
-
-    /// Create a new ParseError from a consumer-defined error.
-    #[inline]
-    pub fn custom<E: Into<T>>(error: E) -> Self {
-        Self {
-            kind: ParseErrorKind::Custom(error.into()),
-        }
-    }
-
+impl<'i, T> ParseError<'i, T> {
     /// Extract the fundamental parse error from an extensible error.
-    pub fn basic(self) -> BasicParseError {
+    pub fn basic(self) -> BasicParseError<'i> {
         match self.kind {
-            ParseErrorKind::Basic(kind) => BasicParseError { kind },
+            ParseErrorKind::Basic(kind) => BasicParseError {
+                kind,
+                location: self.location,
+            },
             ParseErrorKind::Custom(_) => panic!("Not a basic parse error"),
         }
     }
 
     /// Like `std::convert::Into::into`
-    pub fn into<U>(self) -> ParseError<U>
+    pub fn into<U>(self) -> ParseError<'i, U>
     where
         T: Into<U>,
     {
         ParseError {
             kind: self.kind.into(),
+            location: self.location,
         }
     }
 }
 
-impl<E: fmt::Display> fmt::Display for ParseError<E> {
+impl<E: fmt::Display> fmt::Display for ParseError<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.kind.fmt(f)
     }
 }
 
-impl<E: fmt::Display + fmt::Debug> std::error::Error for ParseError<E> {}
+impl<E: fmt::Display + fmt::Debug> std::error::Error for ParseError<'_, E> {}
 
-/// A CSS parser that borrows its `&str` input, yields `Token`s, and keeps track of nested blocks
-/// and functions.
-pub struct Parser<'i> {
+/// The owned input for a parser.
+pub struct ParserInput<'i> {
     tokenizer: Tokenizer<'i>,
-    cached_token: CachedToken<'i>,
-    current_block_depth: u8,
-    nested_block_limit: u8,
-    /// If `Some(_)`, .parse_nested_block() can be called.
-    at_start_of: Option<BlockType>,
-    /// For parsers from `parse_until` or `parse_nested_block`
-    stop_before: Delimiters,
+    cached_token: Option<CachedToken<'i>>,
 }
 
 struct CachedToken<'i> {
     token: Token<'i>,
     start_position: SourcePosition,
     end_state: ParserState,
+}
+
+impl<'i> ParserInput<'i> {
+    /// Create a new input for a parser.
+    pub fn new(input: &'i str) -> ParserInput<'i> {
+        ParserInput {
+            tokenizer: Tokenizer::new(input),
+            cached_token: None,
+        }
+    }
+
+    #[inline]
+    fn cached_token_ref(&self) -> &Token<'i> {
+        &self.cached_token.as_ref().unwrap().token
+    }
+}
+
+/// A CSS parser that borrows its `&str` input,
+/// yields `Token`s,
+/// and keeps track of nested blocks and functions.
+pub struct Parser<'i, 't> {
+    input: &'t mut ParserInput<'i>,
+    /// If `Some(_)`, .parse_nested_block() can be called.
+    at_start_of: Option<BlockType>,
+    /// For parsers from `parse_until` or `parse_nested_block`
+    stop_before: Delimiters,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -322,7 +347,7 @@ impl Delimiters {
     }
 
     #[inline]
-    pub(crate) fn from_byte(byte: u8) -> Delimiters {
+    pub(crate) fn from_byte(byte: Option<u8>) -> Delimiters {
         const TABLE: [Delimiters; 256] = {
             let mut table = [Delimiter::None; 256];
             table[b';' as usize] = Delimiter::Semicolon;
@@ -335,7 +360,8 @@ impl Delimiters {
             table
         };
 
-        TABLE[byte as usize]
+        assert_eq!(TABLE[0], Delimiter::None);
+        TABLE[byte.unwrap_or(0) as usize]
     }
 }
 
@@ -343,10 +369,11 @@ impl Delimiters {
 macro_rules! expect {
     ($parser: ident, $($branches: tt)+) => {
         {
+            let start_location = $parser.current_source_location();
             match *$parser.next()? {
                 $($branches)+
-                _ => {
-                    return Err(BasicParseError::unexpected_token())
+                ref token => {
+                    return Err(start_location.new_basic_unexpected_token_error(token.clone()))
                 }
             }
         }
@@ -357,37 +384,20 @@ macro_rules! expect {
 /// See https://drafts.csswg.org/css-values-5/#arbitrary-substitution
 pub type ArbitrarySubstitutionFunctions<'a> = &'a [&'static str];
 
-impl<'i> Parser<'i> {
-    /// 75 nested blocks seems reasonable enough.
-    const REASONABLE_NESTED_BLOCK_LIMIT: u8 = 75;
-
-    /// Create a new parser for the given input.
+impl<'i: 't, 't> Parser<'i, 't> {
+    /// Create a new parser
     #[inline]
-    pub fn new(input: &'i str) -> Self {
-        Self {
-            tokenizer: Tokenizer::new(input),
+    pub fn new(input: &'t mut ParserInput<'i>) -> Parser<'i, 't> {
+        Parser {
+            input,
             at_start_of: None,
             stop_before: Delimiter::None,
-            nested_block_limit: Self::REASONABLE_NESTED_BLOCK_LIMIT,
-            current_block_depth: 0,
-            cached_token: CachedToken {
-                token: Token::Semicolon,                    // Anything would do.
-                start_position: SourcePosition(usize::MAX), // No token would match this cache.
-                end_state: ParserState::default(),
-            },
         }
-    }
-
-    /// Sets a limit for how many nested blocks we're allowed to parse. This is useful to avoid
-    /// running out of stack space. By default, it's set to `REASONABLE_NESTED_BLOCK_LIMIT`, but it
-    /// can be overridden or cleared. A limit of 0 will be equivalent to no limit at all.
-    pub fn set_nested_block_limit(&mut self, limit: u8) {
-        self.nested_block_limit = limit;
     }
 
     /// Return the current line that is being parsed.
     pub fn current_line(&self) -> &'i str {
-        self.tokenizer.current_source_line()
+        self.input.tokenizer.current_source_line()
     }
 
     /// Check whether the input is exhausted. That is, if `.next()` would return a token.
@@ -403,7 +413,7 @@ impl<'i> Parser<'i> {
     ///
     /// This ignores whitespace and comments.
     #[inline]
-    pub fn expect_exhausted(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_exhausted(&mut self) -> Result<(), BasicParseError<'i>> {
         let start = self.state();
         let result = match self.next() {
             Err(BasicParseError {
@@ -411,7 +421,9 @@ impl<'i> Parser<'i> {
                 ..
             }) => Ok(()),
             Err(e) => unreachable!("Unexpected error encountered: {:?}", e),
-            Ok(_) => Err(BasicParseError::unexpected_token()),
+            Ok(t) => Err(start
+                .source_location()
+                .new_basic_unexpected_token_error(t.clone())),
         };
         self.reset(&start);
         result
@@ -422,13 +434,13 @@ impl<'i> Parser<'i> {
     /// This can be used with the `Parser::slice` and `slice_from` methods.
     #[inline]
     pub fn position(&self) -> SourcePosition {
-        self.tokenizer.position()
+        self.input.tokenizer.position()
     }
 
     /// The current line number and column number.
     #[inline]
     pub fn current_source_location(&self) -> SourceLocation {
-        self.tokenizer.current_source_location()
+        self.input.tokenizer.current_source_location()
     }
 
     /// The source map URL, if known.
@@ -437,7 +449,7 @@ impl<'i> Parser<'i> {
     /// comment.  The last such comment is used, so this value may
     /// change as parsing proceeds.
     pub fn current_source_map_url(&self) -> Option<&str> {
-        self.tokenizer.current_source_map_url()
+        self.input.tokenizer.current_source_map_url()
     }
 
     /// The source URL, if known.
@@ -446,16 +458,47 @@ impl<'i> Parser<'i> {
     /// comment.  The last such comment is used, so this value may
     /// change as parsing proceeds.
     pub fn current_source_url(&self) -> Option<&str> {
-        self.tokenizer.current_source_url()
+        self.input.tokenizer.current_source_url()
+    }
+
+    /// Create a new BasicParseError at the current location
+    #[inline]
+    pub fn new_basic_error(&self, kind: BasicParseErrorKind<'i>) -> BasicParseError<'i> {
+        self.current_source_location().new_basic_error(kind)
+    }
+
+    /// Create a new basic ParseError at the current location
+    #[inline]
+    pub fn new_error<E>(&self, kind: BasicParseErrorKind<'i>) -> ParseError<'i, E> {
+        self.current_source_location().new_error(kind)
+    }
+
+    /// Create a new custom BasicParseError at the current location
+    #[inline]
+    pub fn new_custom_error<E1: Into<E2>, E2>(&self, error: E1) -> ParseError<'i, E2> {
+        self.current_source_location().new_custom_error(error)
+    }
+
+    /// Create a new unexpected token BasicParseError at the current location
+    #[inline]
+    pub fn new_basic_unexpected_token_error(&self, token: Token<'i>) -> BasicParseError<'i> {
+        self.new_basic_error(BasicParseErrorKind::UnexpectedToken(token))
+    }
+
+    /// Create a new unexpected token ParseError at the current location
+    #[inline]
+    pub fn new_unexpected_token_error<E>(&self, token: Token<'i>) -> ParseError<'i, E> {
+        self.new_error(BasicParseErrorKind::UnexpectedToken(token))
     }
 
     /// Create a new unexpected token or EOF ParseError at the current location
     #[inline]
-    pub fn new_error_for_next_token<E>(&mut self) -> ParseError<E> {
-        match self.next() {
-            Ok(_) => ParseError::unexpected_token(),
-            Err(e) => e.into(),
-        }
+    pub fn new_error_for_next_token<E>(&mut self) -> ParseError<'i, E> {
+        let token = match self.next() {
+            Ok(token) => token.clone(),
+            Err(e) => return e.into(),
+        };
+        self.new_error(BasicParseErrorKind::UnexpectedToken(token))
     }
 
     /// Return the current internal state of the parser (including position within the input).
@@ -465,7 +508,7 @@ impl<'i> Parser<'i> {
     pub fn state(&self) -> ParserState {
         ParserState {
             at_start_of: self.at_start_of,
-            ..self.tokenizer.state()
+            ..self.input.tokenizer.state()
         }
     }
 
@@ -473,28 +516,28 @@ impl<'i> Parser<'i> {
     #[inline]
     pub fn skip_whitespace(&mut self) {
         if let Some(block_type) = self.at_start_of.take() {
-            consume_until_end_of_block(block_type, &mut self.tokenizer);
+            consume_until_end_of_block(block_type, &mut self.input.tokenizer);
         }
 
-        self.tokenizer.skip_whitespace()
+        self.input.tokenizer.skip_whitespace()
     }
 
     #[inline]
     pub(crate) fn skip_cdc_and_cdo(&mut self) {
         if let Some(block_type) = self.at_start_of.take() {
-            consume_until_end_of_block(block_type, &mut self.tokenizer);
+            consume_until_end_of_block(block_type, &mut self.input.tokenizer);
         }
 
-        self.tokenizer.skip_cdc_and_cdo()
+        self.input.tokenizer.skip_cdc_and_cdo()
     }
 
     #[inline]
     pub(crate) fn next_byte(&self) -> Option<u8> {
-        let byte = self.tokenizer.next_byte()?;
+        let byte = self.input.tokenizer.next_byte();
         if self.stop_before.contains(Delimiters::from_byte(byte)) {
             return None;
         }
-        Some(byte)
+        byte
     }
 
     /// Restore the internal state of the parser (including position within the input)
@@ -503,7 +546,7 @@ impl<'i> Parser<'i> {
     /// Should only be used with `SourcePosition` values from the same `Parser` instance.
     #[inline]
     pub fn reset(&mut self, state: &ParserState) {
-        self.tokenizer.reset(state);
+        self.input.tokenizer.reset(state);
         self.at_start_of = state.at_start_of;
     }
 
@@ -514,7 +557,8 @@ impl<'i> Parser<'i> {
         &mut self,
         fns: ArbitrarySubstitutionFunctions<'i>,
     ) {
-        self.tokenizer
+        self.input
+            .tokenizer
             .look_for_arbitrary_substitution_functions(fns)
     }
 
@@ -522,14 +566,14 @@ impl<'i> Parser<'i> {
     /// `look_for_arbitrary_substitution_functions` was called, and stop looking.
     #[inline]
     pub fn seen_arbitrary_substitution_functions(&mut self) -> bool {
-        self.tokenizer.seen_arbitrary_substitution_functions()
+        self.input.tokenizer.seen_arbitrary_substitution_functions()
     }
 
     /// The old name of `try_parse`, which requires raw identifiers in the Rust 2018 edition.
     #[inline]
     pub fn r#try<F, T, E>(&mut self, thing: F) -> Result<T, E>
     where
-        F: FnOnce(&mut Parser<'i>) -> Result<T, E>,
+        F: FnOnce(&mut Parser<'i, 't>) -> Result<T, E>,
     {
         self.try_parse(thing)
     }
@@ -541,7 +585,7 @@ impl<'i> Parser<'i> {
     #[inline]
     pub fn try_parse<F, T, E>(&mut self, thing: F) -> Result<T, E>
     where
-        F: FnOnce(&mut Parser<'i>) -> Result<T, E>,
+        F: FnOnce(&mut Parser<'i, 't>) -> Result<T, E>,
     {
         let start = self.state();
         let result = thing(self);
@@ -554,13 +598,13 @@ impl<'i> Parser<'i> {
     /// Return a slice of the CSS input
     #[inline]
     pub fn slice(&self, range: Range<SourcePosition>) -> &'i str {
-        self.tokenizer.slice(range)
+        self.input.tokenizer.slice(range)
     }
 
     /// Return a slice of the CSS input, from the given position to the current one.
     #[inline]
     pub fn slice_from(&self, start_position: SourcePosition) -> &'i str {
-        self.tokenizer.slice_from(start_position)
+        self.input.tokenizer.slice_from(start_position)
     }
 
     /// Return the next token in the input that is neither whitespace or a comment,
@@ -575,17 +619,21 @@ impl<'i> Parser<'i> {
     ///
     /// This only returns a closing token when it is unmatched (and therefore an error).
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<&Token<'i>, BasicParseError> {
+    pub fn next(&mut self) -> Result<&Token<'i>, BasicParseError<'i>> {
         self.skip_whitespace();
         self.next_including_whitespace_and_comments()
     }
 
     /// Same as `Parser::next`, but does not skip whitespace tokens.
-    pub fn next_including_whitespace(&mut self) -> Result<&Token<'i>, BasicParseError> {
-        while let Token::Comment(..) = self.next_including_whitespace_and_comments()? {
-            // Keep going
+    pub fn next_including_whitespace(&mut self) -> Result<&Token<'i>, BasicParseError<'i>> {
+        loop {
+            match self.next_including_whitespace_and_comments() {
+                Err(e) => return Err(e),
+                Ok(&Token::Comment(_)) => {}
+                _ => break,
+            }
         }
-        Ok(&self.cached_token.token)
+        Ok(self.input.cached_token_ref())
     }
 
     /// Same as `Parser::next`, but does not skip whitespace or comment tokens.
@@ -596,36 +644,41 @@ impl<'i> Parser<'i> {
     /// comments should always be ignored between tokens.
     pub fn next_including_whitespace_and_comments(
         &mut self,
-    ) -> Result<&Token<'i>, BasicParseError> {
+    ) -> Result<&Token<'i>, BasicParseError<'i>> {
         if let Some(block_type) = self.at_start_of.take() {
-            consume_until_end_of_block(block_type, &mut self.tokenizer);
+            consume_until_end_of_block(block_type, &mut self.input.tokenizer);
         }
 
-        let Some(byte) = self.tokenizer.next_byte() else {
-            return Err(BasicParseError::new(BasicParseErrorKind::EndOfInput));
-        };
-
+        let byte = self.input.tokenizer.next_byte();
         if self.stop_before.contains(Delimiters::from_byte(byte)) {
-            return Err(BasicParseError::new(BasicParseErrorKind::EndOfInput));
+            return Err(self.new_basic_error(BasicParseErrorKind::EndOfInput));
         }
 
-        let token_start_position = self.tokenizer.position();
-        let using_cached_token = self.cached_token.start_position == token_start_position;
+        let token_start_position = self.input.tokenizer.position();
+        let using_cached_token = self
+            .input
+            .cached_token
+            .as_ref()
+            .is_some_and(|cached_token| cached_token.start_position == token_start_position);
         let token = if using_cached_token {
-            let cached_token = &self.cached_token;
-            self.tokenizer.reset(&cached_token.end_state);
+            let cached_token = self.input.cached_token.as_ref().unwrap();
+            self.input.tokenizer.reset(&cached_token.end_state);
             if let Token::Function(ref name) = cached_token.token {
-                self.tokenizer.see_function(name)
+                self.input.tokenizer.see_function(name)
             }
             &cached_token.token
         } else {
-            let new_token = self.tokenizer.next_unchecked();
-            self.cached_token = CachedToken {
+            let new_token = self
+                .input
+                .tokenizer
+                .next()
+                .map_err(|()| self.new_basic_error(BasicParseErrorKind::EndOfInput))?;
+            self.input.cached_token = Some(CachedToken {
                 token: new_token,
                 start_position: token_start_position,
-                end_state: self.tokenizer.state(),
-            };
-            &self.cached_token.token
+                end_state: self.input.tokenizer.state(),
+            });
+            self.input.cached_token_ref()
         };
 
         if let Some(block_type) = BlockType::opening(token) {
@@ -639,9 +692,9 @@ impl<'i> Parser<'i> {
     ///
     /// This can help tell e.g. `color: green;` from `color: green 4px;`
     #[inline]
-    pub fn parse_entirely<F, T, E>(&mut self, parse: F) -> Result<T, ParseError<E>>
+    pub fn parse_entirely<F, T, E>(&mut self, parse: F) -> Result<T, ParseError<'i, E>>
     where
-        F: FnOnce(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+        F: FnOnce(&mut Parser<'i, 't>) -> Result<T, ParseError<'i, E>>,
     {
         let result = parse(self)?;
         self.expect_exhausted()?;
@@ -660,9 +713,12 @@ impl<'i> Parser<'i> {
     /// or if a closure call leaves some input before the next comma or the end
     /// of the input.
     #[inline]
-    pub fn parse_comma_separated<F, T, E>(&mut self, parse_one: F) -> Result<Vec<T>, ParseError<E>>
+    pub fn parse_comma_separated<F, T, E>(
+        &mut self,
+        parse_one: F,
+    ) -> Result<Vec<T>, ParseError<'i, E>>
     where
-        F: FnMut(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
         self.parse_comma_separated_internal(parse_one, /* ignore_errors = */ false)
     }
@@ -673,9 +729,9 @@ impl<'i> Parser<'i> {
     /// Caller must deal with the fact that the resulting list might be empty,
     /// if there's no valid component on the list.
     #[inline]
-    pub fn parse_comma_separated_ignoring_errors<F, T, E>(&mut self, parse_one: F) -> Vec<T>
+    pub fn parse_comma_separated_ignoring_errors<F, T, E: 'i>(&mut self, parse_one: F) -> Vec<T>
     where
-        F: FnMut(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
         match self.parse_comma_separated_internal(parse_one, /* ignore_errors = */ true) {
             Ok(values) => values,
@@ -688,9 +744,9 @@ impl<'i> Parser<'i> {
         &mut self,
         mut parse_one: F,
         ignore_errors: bool,
-    ) -> Result<Vec<T>, ParseError<E>>
+    ) -> Result<Vec<T>, ParseError<'i, E>>
     where
-        F: FnMut(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
         // Vec grows from 0 to 4 by default on first push().  So allocate with
         // capacity 1, so in the somewhat common case of only one item we don't
@@ -724,9 +780,9 @@ impl<'i> Parser<'i> {
     ///
     /// The result is overridden to an `Err(..)` if the closure leaves some input before that point.
     #[inline]
-    pub fn parse_nested_block<F, T, E>(&mut self, parse: F) -> Result<T, ParseError<E>>
+    pub fn parse_nested_block<F, T, E>(&mut self, parse: F) -> Result<T, ParseError<'i, E>>
     where
-        F: FnOnce(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+        F: for<'tt> FnOnce(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
         parse_nested_block(self, parse)
     }
@@ -744,9 +800,9 @@ impl<'i> Parser<'i> {
         &mut self,
         delimiters: Delimiters,
         parse: F,
-    ) -> Result<T, ParseError<E>>
+    ) -> Result<T, ParseError<'i, E>>
     where
-        F: FnOnce(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+        F: for<'tt> FnOnce(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
         parse_until_before(self, delimiters, ParseUntilErrorBehavior::Consume, parse)
     }
@@ -761,25 +817,26 @@ impl<'i> Parser<'i> {
         &mut self,
         delimiters: Delimiters,
         parse: F,
-    ) -> Result<T, ParseError<E>>
+    ) -> Result<T, ParseError<'i, E>>
     where
-        F: FnOnce(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+        F: for<'tt> FnOnce(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
         parse_until_after(self, delimiters, ParseUntilErrorBehavior::Consume, parse)
     }
 
     /// Parse a <whitespace-token> and return its value.
     #[inline]
-    pub fn expect_whitespace(&mut self) -> Result<&'i str, BasicParseError> {
+    pub fn expect_whitespace(&mut self) -> Result<&'i str, BasicParseError<'i>> {
+        let start_location = self.current_source_location();
         match *self.next_including_whitespace()? {
             Token::WhiteSpace(value) => Ok(value),
-            _ => Err(BasicParseError::unexpected_token()),
+            ref t => Err(start_location.new_basic_unexpected_token_error(t.clone())),
         }
     }
 
     /// Parse a <ident-token> and return the unescaped value.
     #[inline]
-    pub fn expect_ident(&mut self) -> Result<&CowRcStr<'i>, BasicParseError> {
+    pub fn expect_ident(&mut self) -> Result<&CowRcStr<'i>, BasicParseError<'i>> {
         expect! {self,
             Token::Ident(ref value) => Ok(value),
         }
@@ -787,13 +844,16 @@ impl<'i> Parser<'i> {
 
     /// expect_ident, but clone the CowRcStr
     #[inline]
-    pub fn expect_ident_cloned(&mut self) -> Result<CowRcStr<'i>, BasicParseError> {
+    pub fn expect_ident_cloned(&mut self) -> Result<CowRcStr<'i>, BasicParseError<'i>> {
         self.expect_ident().cloned()
     }
 
     /// Parse a <ident-token> whose unescaped value is an ASCII-insensitive match for the given value.
     #[inline]
-    pub fn expect_ident_matching(&mut self, expected_value: &str) -> Result<(), BasicParseError> {
+    pub fn expect_ident_matching(
+        &mut self,
+        expected_value: &str,
+    ) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::Ident(ref value) if value.eq_ignore_ascii_case(expected_value) => Ok(()),
         }
@@ -801,7 +861,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a <string-token> and return the unescaped value.
     #[inline]
-    pub fn expect_string(&mut self) -> Result<&CowRcStr<'i>, BasicParseError> {
+    pub fn expect_string(&mut self) -> Result<&CowRcStr<'i>, BasicParseError<'i>> {
         expect! {self,
             Token::QuotedString(ref value) => Ok(value),
         }
@@ -809,13 +869,13 @@ impl<'i> Parser<'i> {
 
     /// expect_string, but clone the CowRcStr
     #[inline]
-    pub fn expect_string_cloned(&mut self) -> Result<CowRcStr<'i>, BasicParseError> {
+    pub fn expect_string_cloned(&mut self) -> Result<CowRcStr<'i>, BasicParseError<'i>> {
         self.expect_string().cloned()
     }
 
     /// Parse either a <ident-token> or a <string-token>, and return the unescaped value.
     #[inline]
-    pub fn expect_ident_or_string(&mut self) -> Result<&CowRcStr<'i>, BasicParseError> {
+    pub fn expect_ident_or_string(&mut self) -> Result<&CowRcStr<'i>, BasicParseError<'i>> {
         expect! {self,
             Token::Ident(ref value) => Ok(value),
             Token::QuotedString(ref value) => Ok(value),
@@ -824,7 +884,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a <url-token> and return the unescaped value.
     #[inline]
-    pub fn expect_url(&mut self) -> Result<CowRcStr<'i>, BasicParseError> {
+    pub fn expect_url(&mut self) -> Result<CowRcStr<'i>, BasicParseError<'i>> {
         expect! {self,
             Token::UnquotedUrl(ref value) => Ok(value.clone()),
             Token::Function(ref name) if name.eq_ignore_ascii_case("url") => {
@@ -838,7 +898,7 @@ impl<'i> Parser<'i> {
 
     /// Parse either a <url-token> or a <string-token>, and return the unescaped value.
     #[inline]
-    pub fn expect_url_or_string(&mut self) -> Result<CowRcStr<'i>, BasicParseError> {
+    pub fn expect_url_or_string(&mut self) -> Result<CowRcStr<'i>, BasicParseError<'i>> {
         expect! {self,
             Token::UnquotedUrl(ref value) => Ok(value.clone()),
             Token::QuotedString(ref value) => Ok(value.clone()),
@@ -853,7 +913,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a <number-token> and return the integer value.
     #[inline]
-    pub fn expect_number(&mut self) -> Result<f32, BasicParseError> {
+    pub fn expect_number(&mut self) -> Result<f32, BasicParseError<'i>> {
         expect! {self,
             Token::Number { value, .. } => Ok(value),
         }
@@ -861,7 +921,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a <number-token> that does not have a fractional part, and return the integer value.
     #[inline]
-    pub fn expect_integer(&mut self) -> Result<i32, BasicParseError> {
+    pub fn expect_integer(&mut self) -> Result<i32, BasicParseError<'i>> {
         expect! {self,
             Token::Number { int_value: Some(int_value), .. } => Ok(int_value),
         }
@@ -870,7 +930,7 @@ impl<'i> Parser<'i> {
     /// Parse a <percentage-token> and return the value.
     /// `0%` and `100%` map to `0.0` and `1.0` (not `100.0`), respectively.
     #[inline]
-    pub fn expect_percentage(&mut self) -> Result<f32, BasicParseError> {
+    pub fn expect_percentage(&mut self) -> Result<f32, BasicParseError<'i>> {
         expect! {self,
             Token::Percentage { unit_value, .. } => Ok(unit_value),
         }
@@ -878,7 +938,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a `:` <colon-token>.
     #[inline]
-    pub fn expect_colon(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_colon(&mut self) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::Colon => Ok(()),
         }
@@ -886,7 +946,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a `;` <semicolon-token>.
     #[inline]
-    pub fn expect_semicolon(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_semicolon(&mut self) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::Semicolon => Ok(()),
         }
@@ -894,7 +954,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a `,` <comma-token>.
     #[inline]
-    pub fn expect_comma(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_comma(&mut self) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::Comma => Ok(()),
         }
@@ -902,7 +962,7 @@ impl<'i> Parser<'i> {
 
     /// Parse a <delim-token> with the given value.
     #[inline]
-    pub fn expect_delim(&mut self, expected_value: char) -> Result<(), BasicParseError> {
+    pub fn expect_delim(&mut self, expected_value: char) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::Delim(value) if value == expected_value => Ok(()),
         }
@@ -912,7 +972,7 @@ impl<'i> Parser<'i> {
     ///
     /// If the result is `Ok`, you can then call the `Parser::parse_nested_block` method.
     #[inline]
-    pub fn expect_curly_bracket_block(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_curly_bracket_block(&mut self) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::CurlyBracketBlock => Ok(()),
         }
@@ -922,7 +982,7 @@ impl<'i> Parser<'i> {
     ///
     /// If the result is `Ok`, you can then call the `Parser::parse_nested_block` method.
     #[inline]
-    pub fn expect_square_bracket_block(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_square_bracket_block(&mut self) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::SquareBracketBlock => Ok(()),
         }
@@ -932,7 +992,7 @@ impl<'i> Parser<'i> {
     ///
     /// If the result is `Ok`, you can then call the `Parser::parse_nested_block` method.
     #[inline]
-    pub fn expect_parenthesis_block(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_parenthesis_block(&mut self) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::ParenthesisBlock => Ok(()),
         }
@@ -942,7 +1002,7 @@ impl<'i> Parser<'i> {
     ///
     /// If the result is `Ok`, you can then call the `Parser::parse_nested_block` method.
     #[inline]
-    pub fn expect_function(&mut self) -> Result<&CowRcStr<'i>, BasicParseError> {
+    pub fn expect_function(&mut self) -> Result<&CowRcStr<'i>, BasicParseError<'i>> {
         expect! {self,
             Token::Function(ref name) => Ok(name),
         }
@@ -952,7 +1012,10 @@ impl<'i> Parser<'i> {
     ///
     /// If the result is `Ok`, you can then call the `Parser::parse_nested_block` method.
     #[inline]
-    pub fn expect_function_matching(&mut self, expected_name: &str) -> Result<(), BasicParseError> {
+    pub fn expect_function_matching(
+        &mut self,
+        expected_name: &str,
+    ) -> Result<(), BasicParseError<'i>> {
         expect! {self,
             Token::Function(ref name) if name.eq_ignore_ascii_case(expected_name) => Ok(()),
         }
@@ -962,7 +1025,7 @@ impl<'i> Parser<'i> {
     ///
     /// See `Token::is_parse_error`. This also checks nested blocks and functions recursively.
     #[inline]
-    pub fn expect_no_error_token(&mut self) -> Result<(), BasicParseError> {
+    pub fn expect_no_error_token(&mut self) -> Result<(), BasicParseError<'i>> {
         loop {
             match self.next_including_whitespace_and_comments() {
                 Ok(&Token::Function(_))
@@ -975,7 +1038,8 @@ impl<'i> Parser<'i> {
                     // FIXME: maybe these should be separate variants of
                     // BasicParseError instead?
                     if t.is_parse_error() {
-                        return Err(BasicParseError::unexpected_token());
+                        let token = t.clone();
+                        return Err(self.new_basic_unexpected_token_error(token));
                     }
                 }
                 Err(_) => return Ok(()),
@@ -984,72 +1048,83 @@ impl<'i> Parser<'i> {
     }
 }
 
-pub fn parse_until_before<'i, F, T, E>(
-    parser: &mut Parser<'i>,
+pub fn parse_until_before<'i: 't, 't, F, T, E>(
+    parser: &mut Parser<'i, 't>,
     delimiters: Delimiters,
     error_behavior: ParseUntilErrorBehavior,
     parse: F,
-) -> Result<T, ParseError<E>>
+) -> Result<T, ParseError<'i, E>>
 where
-    F: FnOnce(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+    F: for<'tt> FnOnce(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
 {
-    let old_stop_before = parser.stop_before;
     let delimiters = parser.stop_before | delimiters;
-    parser.stop_before = delimiters;
-    let result = parser.parse_entirely(parse);
-    parser.stop_before = old_stop_before;
-    if error_behavior == ParseUntilErrorBehavior::Stop && result.is_err() {
-        return result;
-    }
-    if let Some(block_type) = parser.at_start_of.take() {
-        consume_until_end_of_block(block_type, &mut parser.tokenizer);
+    let result;
+    // Introduce a new scope to limit duration of nested_parser’s borrow
+    {
+        let mut delimited_parser = Parser {
+            input: parser.input,
+            at_start_of: parser.at_start_of.take(),
+            stop_before: delimiters,
+        };
+        result = delimited_parser.parse_entirely(parse);
+        if error_behavior == ParseUntilErrorBehavior::Stop && result.is_err() {
+            return result;
+        }
+        if let Some(block_type) = delimited_parser.at_start_of {
+            consume_until_end_of_block(block_type, &mut delimited_parser.input.tokenizer);
+        }
     }
     // FIXME: have a special-purpose tokenizer method for this that does less work.
-    while let Some(next_byte) = parser.tokenizer.next_byte() {
-        if delimiters.contains(Delimiters::from_byte(next_byte)) {
+    loop {
+        if delimiters.contains(Delimiters::from_byte(parser.input.tokenizer.next_byte())) {
             break;
         }
-        let token = parser.tokenizer.next_unchecked();
-        if let Some(block_type) = BlockType::opening(&token) {
-            consume_until_end_of_block(block_type, &mut parser.tokenizer);
+        if let Ok(token) = parser.input.tokenizer.next() {
+            if let Some(block_type) = BlockType::opening(&token) {
+                consume_until_end_of_block(block_type, &mut parser.input.tokenizer);
+            }
+        } else {
+            break;
         }
     }
     result
 }
 
-pub fn parse_until_after<'i, F, T, E>(
-    parser: &mut Parser<'i>,
+pub fn parse_until_after<'i: 't, 't, F, T, E>(
+    parser: &mut Parser<'i, 't>,
     delimiters: Delimiters,
     error_behavior: ParseUntilErrorBehavior,
     parse: F,
-) -> Result<T, ParseError<E>>
+) -> Result<T, ParseError<'i, E>>
 where
-    F: FnOnce(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+    F: for<'tt> FnOnce(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
 {
     let result = parse_until_before(parser, delimiters, error_behavior, parse);
     if error_behavior == ParseUntilErrorBehavior::Stop && result.is_err() {
         return result;
     }
-    if let Some(next_byte) = parser.tokenizer.next_byte() {
-        let delimiter = Delimiters::from_byte(next_byte);
-        if !parser.stop_before.contains(delimiter) {
-            debug_assert!(delimiters.contains(delimiter));
-            // We know this byte is ASCII.
-            parser.tokenizer.advance(1);
-            if next_byte == b'{' {
-                consume_until_end_of_block(BlockType::CurlyBracket, &mut parser.tokenizer);
-            }
+    let next_byte = parser.input.tokenizer.next_byte();
+    if next_byte.is_some()
+        && !parser
+            .stop_before
+            .contains(Delimiters::from_byte(next_byte))
+    {
+        debug_assert!(delimiters.contains(Delimiters::from_byte(next_byte)));
+        // We know this byte is ASCII.
+        parser.input.tokenizer.advance(1);
+        if next_byte == Some(b'{') {
+            consume_until_end_of_block(BlockType::CurlyBracket, &mut parser.input.tokenizer);
         }
     }
     result
 }
 
-pub fn parse_nested_block<'i, F, T, E>(
-    parser: &mut Parser<'i>,
+pub fn parse_nested_block<'i: 't, 't, F, T, E>(
+    parser: &mut Parser<'i, 't>,
     parse: F,
-) -> Result<T, ParseError<E>>
+) -> Result<T, ParseError<'i, E>>
 where
-    F: FnOnce(&mut Parser<'i>) -> Result<T, ParseError<E>>,
+    F: for<'tt> FnOnce(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
 {
     let block_type = parser.at_start_of.take().expect(
         "\
@@ -1058,27 +1133,25 @@ where
          token was just consumed.\
          ",
     );
-    if parser.current_block_depth >= parser.nested_block_limit && parser.nested_block_limit != 0 {
-        return Err(ParseError::from_basic_kind(
-            BasicParseErrorKind::TooManyNestedBlocks,
-        ));
-    }
-    // Fine to use wrapping addition, overflow can only occur without a limit.
-    parser.current_block_depth = parser.current_block_depth.wrapping_add(1);
-
-    let old_stop_before = parser.stop_before;
-    parser.stop_before = match block_type {
+    let closing_delimiter = match block_type {
         BlockType::CurlyBracket => ClosingDelimiter::CloseCurlyBracket,
         BlockType::SquareBracket => ClosingDelimiter::CloseSquareBracket,
         BlockType::Parenthesis => ClosingDelimiter::CloseParenthesis,
     };
-    let result = parser.parse_entirely(parse);
-    if let Some(nested_block_type) = parser.at_start_of.take() {
-        consume_until_end_of_block(nested_block_type, &mut parser.tokenizer);
+    let result;
+    // Introduce a new scope to limit duration of nested_parser’s borrow
+    {
+        let mut nested_parser = Parser {
+            input: parser.input,
+            at_start_of: None,
+            stop_before: closing_delimiter,
+        };
+        result = nested_parser.parse_entirely(parse);
+        if let Some(block_type) = nested_parser.at_start_of {
+            consume_until_end_of_block(block_type, &mut nested_parser.input.tokenizer);
+        }
     }
-    consume_until_end_of_block(block_type, &mut parser.tokenizer);
-    parser.stop_before = old_stop_before;
-    parser.current_block_depth = parser.current_block_depth.wrapping_sub(1);
+    consume_until_end_of_block(block_type, &mut parser.input.tokenizer);
     result
 }
 

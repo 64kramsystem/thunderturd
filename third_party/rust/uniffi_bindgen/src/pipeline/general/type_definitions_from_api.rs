@@ -10,21 +10,14 @@ use indexmap::IndexSet;
 
 use super::*;
 
-pub fn type_definitions(
-    namespace: &initial::Namespace,
-    context: &Context,
-) -> Result<Vec<TypeDefinition>> {
+pub fn pass(namespace: &mut Namespace) -> Result<()> {
     // Map types to type definitions to add
     let mut all_types = IndexSet::<Type>::default();
-    // String is used in the builtin functions, so force it to be present.
-    all_types.insert(Type::String);
     namespace.visit(|ty: &Type| {
-        all_types.insert(ty.clone());
+        collect_all_types(&mut all_types, ty);
     });
-    let mut type_definitions = vec![];
     for ty in all_types {
-        let self_type = ty.clone().map_node(context)?;
-        match ty {
+        match &ty {
             Type::UInt8
             | Type::Int8
             | Type::UInt16
@@ -40,41 +33,61 @@ pub fn type_definitions(
             | Type::Bytes
             | Type::Timestamp
             | Type::Duration => {
-                type_definitions.push(TypeDefinition::Simple(ty.map_node(context)?));
-            }
-            Type::Box { inner_type } => {
-                type_definitions.push(TypeDefinition::Box(BoxedType {
-                    inner: (*inner_type).map_node(context)?,
-                    self_type,
-                }));
+                namespace
+                    .type_definitions
+                    .push(TypeDefinition::Simple(TypeNode {
+                        ty,
+                        ..TypeNode::default()
+                    }));
             }
             Type::Optional { inner_type } => {
-                type_definitions.push(TypeDefinition::Optional(OptionalType {
-                    inner: (*inner_type).map_node(context)?,
-                    self_type,
-                }));
+                namespace
+                    .type_definitions
+                    .push(TypeDefinition::Optional(OptionalType {
+                        inner: TypeNode {
+                            ty: (**inner_type).clone(),
+                            ..TypeNode::default()
+                        },
+                        self_type: TypeNode {
+                            ty,
+                            ..TypeNode::default()
+                        },
+                    }));
             }
             Type::Sequence { inner_type } => {
-                type_definitions.push(TypeDefinition::Sequence(SequenceType {
-                    inner: (*inner_type).map_node(context)?,
-                    self_type,
-                }));
+                namespace
+                    .type_definitions
+                    .push(TypeDefinition::Sequence(SequenceType {
+                        inner: TypeNode {
+                            ty: (**inner_type).clone(),
+                            ..TypeNode::default()
+                        },
+                        self_type: TypeNode {
+                            ty,
+                            ..TypeNode::default()
+                        },
+                    }));
             }
             Type::Map {
                 key_type,
                 value_type,
             } => {
-                type_definitions.push(TypeDefinition::Map(MapType {
-                    key: (*key_type).map_node(context)?,
-                    value: (*value_type).map_node(context)?,
-                    self_type,
-                }));
-            }
-            Type::Set { inner_type } => {
-                type_definitions.push(TypeDefinition::Set(SetType {
-                    inner: (*inner_type).map_node(context)?,
-                    self_type,
-                }));
+                namespace
+                    .type_definitions
+                    .push(TypeDefinition::Map(MapType {
+                        key: TypeNode {
+                            ty: (**key_type).clone(),
+                            ..TypeNode::default()
+                        },
+                        value: TypeNode {
+                            ty: (**value_type).clone(),
+                            ..TypeNode::default()
+                        },
+                        self_type: TypeNode {
+                            ty,
+                            ..TypeNode::default()
+                        },
+                    }));
             }
             Type::Record {
                 namespace: namespace_name,
@@ -96,14 +109,36 @@ pub fn type_definitions(
                 name,
                 ..
             } if *namespace_name != namespace.name => {
-                type_definitions.push(TypeDefinition::External(ExternalType {
-                    namespace: namespace_name.clone(),
-                    name: name.clone(),
-                    self_type,
-                }))
+                namespace
+                    .type_definitions
+                    .push(TypeDefinition::External(ExternalType {
+                        namespace: namespace_name.clone(),
+                        name: name.clone(),
+                        self_type: TypeNode {
+                            ty: ty.clone(),
+                            ..TypeNode::default()
+                        },
+                    }))
             }
             _ => (),
         }
     }
-    Ok(type_definitions)
+    Ok(())
+}
+
+fn collect_all_types(all_types: &mut IndexSet<Type>, ty: &Type) {
+    all_types.insert(ty.clone());
+    match ty {
+        Type::Optional { inner_type } => collect_all_types(all_types, inner_type.as_ref()),
+        Type::Sequence { inner_type } => collect_all_types(all_types, inner_type.as_ref()),
+        Type::Map {
+            key_type,
+            value_type,
+        } => {
+            collect_all_types(all_types, key_type.as_ref());
+            collect_all_types(all_types, value_type.as_ref());
+        }
+        Type::Custom { builtin, .. } => collect_all_types(all_types, builtin.as_ref()),
+        _ => (),
+    }
 }

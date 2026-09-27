@@ -104,7 +104,7 @@ impl fmt::Debug for InternalCounter {
 
 /// `wgpu-hal`'s part of [`InternalCounters`].
 #[allow(missing_docs)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct HalCounters {
     // API objects
     pub buffers: InternalCounter,
@@ -114,7 +114,6 @@ pub struct HalCounters {
     pub bind_group_layouts: InternalCounter,
     pub render_pipelines: InternalCounter,
     pub compute_pipelines: InternalCounter,
-    pub ray_tracing_pipelines: InternalCounter,
     pub pipeline_layouts: InternalCounter,
     pub samplers: InternalCounter,
     pub command_encoders: InternalCounter,
@@ -134,7 +133,7 @@ pub struct HalCounters {
 }
 
 /// `wgpu-core`'s part of [`InternalCounters`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct CoreCounters {
     // TODO    #[cfg(features=)]
 }
@@ -143,7 +142,7 @@ pub struct CoreCounters {
 ///
 /// Obtain this from
 /// [`Device::get_internal_counters()`](../wgpu/struct.Device.html#method.get_internal_counters).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct InternalCounters {
     /// `wgpu-core` counters.
     pub core: CoreCounters,
@@ -163,7 +162,7 @@ pub struct AllocationReport {
 }
 
 /// Describes a memory block in the [`AllocatorReport`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MemoryBlockReport {
     /// The size in bytes of this memory block.
     pub size: u64,

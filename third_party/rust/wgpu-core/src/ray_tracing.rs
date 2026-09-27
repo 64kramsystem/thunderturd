@@ -21,10 +21,11 @@ use wgt::{
 #[cfg(feature = "serde")]
 use crate::command::serde_object_reference_struct;
 use crate::{
-    command::{ArcReferences, EncoderStateError, ReferenceType},
+    command::{ArcReferences, EncoderStateError, IdReferences, ReferenceType},
     device::{DeviceError, MissingFeatures},
+    id::{BlasId, BufferId, TlasId},
     resource::{
-        self, Blas, BlasCompactCallback, BlasPrepareCompactResult, DestroyedResourceError,
+        Blas, BlasCompactCallback, BlasPrepareCompactResult, DestroyedResourceError,
         InvalidResourceError, MissingBufferUsageError, ResourceErrorIdent, Tlas,
     },
 };
@@ -47,6 +48,8 @@ pub enum CreateBlasError {
         "Limit `max_blas_primitive_count` is {0}, but the BLAS had a maximum of {1} primitives"
     )]
     TooManyPrimitives(u32, u32),
+    #[error("AABB geometry stride {0} is invalid (must be >= {1} and a multiple of 8)")]
+    InvalidAabbStride(BufferAddress, BufferAddress),
 }
 
 impl WebGpuError for CreateBlasError {
@@ -57,7 +60,8 @@ impl WebGpuError for CreateBlasError {
             Self::MissingIndexData
             | Self::InvalidVertexFormat(..)
             | Self::TooManyGeometries(..)
-            | Self::TooManyPrimitives(..) => ErrorType::Validation,
+            | Self::TooManyPrimitives(..)
+            | Self::InvalidAabbStride(..) => ErrorType::Validation,
         }
     }
 }
@@ -277,11 +281,11 @@ impl WebGpuError for ValidateAsActionsError {
 }
 
 #[derive(Debug)]
-pub struct BlasTriangleGeometry<'a, Buffer = Arc<resource::Buffer>> {
+pub struct BlasTriangleGeometry<'a> {
     pub size: &'a wgt::BlasTriangleGeometrySizeDescriptor,
-    pub vertex_buffer: Buffer,
-    pub index_buffer: Option<Buffer>,
-    pub transform_buffer: Option<Buffer>,
+    pub vertex_buffer: BufferId,
+    pub index_buffer: Option<BufferId>,
+    pub transform_buffer: Option<BufferId>,
     pub first_vertex: u32,
     pub vertex_stride: BufferAddress,
     pub first_index: Option<u32>,
@@ -289,42 +293,42 @@ pub struct BlasTriangleGeometry<'a, Buffer = Arc<resource::Buffer>> {
 }
 
 #[derive(Debug)]
-pub struct BlasAabbGeometry<'a, Buffer = Arc<resource::Buffer>> {
+pub struct BlasAabbGeometry<'a> {
     pub size: &'a wgt::BlasAABBGeometrySizeDescriptor,
     pub stride: BufferAddress,
-    pub aabb_buffer: Buffer,
+    pub aabb_buffer: BufferId,
     pub primitive_offset: u32,
 }
 
-pub enum BlasGeometries<'a, Buffer = Arc<resource::Buffer>> {
-    TriangleGeometries(Box<dyn Iterator<Item = BlasTriangleGeometry<'a, Buffer>> + 'a>),
-    AabbGeometries(Box<dyn Iterator<Item = BlasAabbGeometry<'a, Buffer>> + 'a>),
+pub enum BlasGeometries<'a> {
+    TriangleGeometries(Box<dyn Iterator<Item = BlasTriangleGeometry<'a>> + 'a>),
+    AabbGeometries(Box<dyn Iterator<Item = BlasAabbGeometry<'a>> + 'a>),
 }
 
-pub struct BlasBuildEntry<'a, Blas = Arc<resource::Blas>, Buffer = Arc<resource::Buffer>> {
-    pub blas: Blas,
-    pub geometries: BlasGeometries<'a, Buffer>,
+pub struct BlasBuildEntry<'a> {
+    pub blas_id: BlasId,
+    pub geometries: BlasGeometries<'a>,
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct TlasBuildEntry<Tlas = Arc<resource::Tlas>, Buffer = Arc<resource::Buffer>> {
-    pub tlas: Tlas,
-    pub instance_buffer: Buffer,
+pub struct TlasBuildEntry {
+    pub tlas_id: TlasId,
+    pub instance_buffer_id: BufferId,
     pub instance_count: u32,
 }
 
 #[derive(Debug)]
-pub struct TlasInstance<'a, Blas = Arc<resource::Blas>> {
-    pub blas: Blas,
+pub struct TlasInstance<'a> {
+    pub blas_id: BlasId,
     pub transform: &'a [f32; 12],
     pub custom_data: u32,
     pub mask: u8,
 }
 
-pub struct TlasPackage<'a, Tlas = Arc<resource::Tlas>, Blas = Arc<resource::Blas>> {
-    pub tlas: Tlas,
-    pub instances: Box<dyn Iterator<Item = Option<TlasInstance<'a, Blas>>> + 'a>,
+pub struct TlasPackage<'a> {
+    pub tlas_id: TlasId,
+    pub instances: Box<dyn Iterator<Item = Option<TlasInstance<'a>>> + 'a>,
     pub lowest_unmodified: u32,
 }
 
@@ -370,6 +374,7 @@ pub struct OwnedBlasTriangleGeometry<R: ReferenceType> {
 }
 
 pub type ArcBlasTriangleGeometry = OwnedBlasTriangleGeometry<ArcReferences>;
+pub type TraceBlasTriangleGeometry = OwnedBlasTriangleGeometry<IdReferences>;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", apply(serde_object_reference_struct))]
@@ -381,6 +386,7 @@ pub struct OwnedBlasAabbGeometry<R: ReferenceType> {
 }
 
 pub type ArcBlasAabbGeometry = OwnedBlasAabbGeometry<ArcReferences>;
+pub type TraceBlasAabbGeometry = OwnedBlasAabbGeometry<IdReferences>;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", apply(serde_object_reference_struct))]
@@ -390,6 +396,7 @@ pub enum OwnedBlasGeometries<R: ReferenceType> {
 }
 
 pub type ArcBlasGeometries = OwnedBlasGeometries<ArcReferences>;
+pub type TraceBlasGeometries = OwnedBlasGeometries<IdReferences>;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", apply(serde_object_reference_struct))]
@@ -399,6 +406,7 @@ pub struct OwnedBlasBuildEntry<R: ReferenceType> {
 }
 
 pub type ArcBlasBuildEntry = OwnedBlasBuildEntry<ArcReferences>;
+pub type TraceBlasBuildEntry = OwnedBlasBuildEntry<IdReferences>;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", apply(serde_object_reference_struct))]
@@ -410,6 +418,7 @@ pub struct OwnedTlasInstance<R: ReferenceType> {
 }
 
 pub type ArcTlasInstance = OwnedTlasInstance<ArcReferences>;
+pub type TraceTlasInstance = OwnedTlasInstance<IdReferences>;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", apply(serde_object_reference_struct))]
@@ -419,6 +428,7 @@ pub struct OwnedTlasPackage<R: ReferenceType> {
     pub lowest_unmodified: u32,
 }
 
+pub type TraceTlasPackage = OwnedTlasPackage<IdReferences>;
 pub type ArcTlasPackage = OwnedTlasPackage<ArcReferences>;
 
 /// [`BlasTriangleGeometry`], without the resources.

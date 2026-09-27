@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2024"
-rust-version = "1.85"
+edition = "2021"
+rust-version = "1.66"
 name = "phf"
-version = "0.14.0"
+version = "0.13.1"
 authors = ["Steven Fackler <sfackler@gmail.com>"]
 build = false
 autolib = false
@@ -35,17 +35,13 @@ resolver = "1"
 features = ["macros"]
 
 [package.metadata.playground]
+all-features = false
 default-features = true
 features = ["macros"]
-all-features = false
 
 [features]
 default = ["std"]
 macros = ["phf_macros"]
-ptrhash = [
-    "phf_macros?/ptrhash",
-    "phf_shared/ptrhash",
-]
 std = [
     "phf_shared/std",
     "serde?/std",
@@ -65,11 +61,11 @@ path = "src/lib.rs"
 test = false
 
 [dependencies.phf_macros]
-version = "^0.14.0"
+version = "^0.13.1"
 optional = true
 
 [dependencies.phf_shared]
-version = "^0.14.0"
+version = "^0.13.1"
 default-features = false
 
 [dependencies.serde]

@@ -67,10 +67,7 @@ impl ContextOps for TestContext {
         _state_callback: ffi::cubeb_state_callback,
         _user_ptr: *mut c_void,
     ) -> Result<Stream> {
-        let stm = Box::new(TestStream {
-            device: Default::default(),
-        });
-        Ok(unsafe { Stream::from_ptr(Box::into_raw(stm) as *mut _) })
+        Ok(unsafe { Stream::from_ptr(0xDEAD_BEEF as *mut _) })
     }
     fn register_device_collection_changed(
         &mut self,
@@ -82,9 +79,7 @@ impl ContextOps for TestContext {
     }
 }
 
-struct TestStream {
-    device: ffi::cubeb_device,
-}
+struct TestStream {}
 
 impl StreamOps for TestStream {
     fn start(&mut self) -> Result<()> {
@@ -111,7 +106,7 @@ impl StreamOps for TestStream {
         Ok(())
     }
     fn current_device(&mut self) -> Result<&DeviceRef> {
-        Ok(unsafe { DeviceRef::from_ptr(&mut self.device as *mut _) })
+        Ok(unsafe { DeviceRef::from_ptr(0xDEAD_BEEF as *mut _) })
     }
     fn set_input_mute(&mut self, mute: bool) -> Result<()> {
         assert_eq!(mute, true);
@@ -122,7 +117,7 @@ impl StreamOps for TestStream {
         Ok(())
     }
     fn device_destroy(&mut self, device: &DeviceRef) -> Result<()> {
-        assert_eq!(device.as_ptr(), &self.device as *const _ as *mut _);
+        assert_eq!(device.as_ptr(), 0xDEAD_BEEF as *mut _);
         Ok(())
     }
     fn register_device_changed_callback(
@@ -262,11 +257,7 @@ fn test_ops_stream_current_device() {
         unsafe { OPS.stream_get_current_device.unwrap()(s, &mut device) },
         ffi::CUBEB_OK
     );
-    assert!(!device.is_null());
-    assert_eq!(
-        unsafe { OPS.stream_device_destroy.unwrap()(s, device) },
-        ffi::CUBEB_OK
-    );
+    assert_eq!(device, 0xDEAD_BEEF as *mut _);
 }
 
 #[test]

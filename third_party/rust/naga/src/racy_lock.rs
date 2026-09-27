@@ -14,7 +14,6 @@ type Inner<T> = OnceBox<T>;
 ///
 /// [`LazyLock`]: https://doc.rust-lang.org/stable/std/sync/struct.LazyLock.html
 /// [`OnceBox`]: https://docs.rs/once_cell/latest/once_cell/race/struct.OnceBox.html
-#[derive(Debug)]
 pub struct RacyLock<T: 'static> {
     inner: Inner<T>,
     #[cfg(no_std)]

@@ -91,15 +91,6 @@ Naga's rules for when `Expression`s are evaluated are as follows:
     [`RayQuery`] statement whose [`Proceed::result`] points to it is
     executed.
 
--   A [`SubgroupBallotResult`] expression is evaluated when the
-    [`SubgroupBallot`] statement whose [`result`][Statement::SubgroupBallot::result]
-    field points to it is executed.
-
--   A [`SubgroupOperationResult`] expression is evaluated when the
-    [`SubgroupCollectiveOperation`] statement whose
-    [`result`][Statement::SubgroupCollectiveOperation::result]
-    field points to it is executed.
-
 -   All other expressions are evaluated when the (unique) [`Statement::Emit`]
     statement that covers them is executed.
 
@@ -188,8 +179,6 @@ An override expression can be evaluated at pipeline creation time.
 
 [`AtomicResult`]: Expression::AtomicResult
 [`RayQueryProceedResult`]: Expression::RayQueryProceedResult
-[`SubgroupBallotResult`]: Expression::SubgroupBallotResult
-[`SubgroupOperationResult`]: Expression::SubgroupOperationResult
 [`CallResult`]: Expression::CallResult
 [`Constant`]: Expression::Constant
 [`ZeroValue`]: Expression::ZeroValue
@@ -207,8 +196,6 @@ An override expression can be evaluated at pipeline creation time.
 [`Emit`]: Statement::Emit
 [`Store`]: Statement::Store
 [`RayQuery`]: Statement::RayQuery
-[`SubgroupBallot`]: Statement::SubgroupBallot
-[`SubgroupCollectiveOperation`]: Statement::SubgroupCollectiveOperation
 
 [`Proceed::result`]: RayQueryFunction::Proceed::result
 
@@ -249,7 +236,6 @@ use crate::diagnostic_filter::DiagnosticFilterNode;
 use crate::{FastIndexMap, NamedExpressions};
 
 pub use block::Block;
-pub use naga_types::{ResourceBinding, ShaderStage};
 
 /// Explicitly allows early depth/stencil tests.
 ///
@@ -327,6 +313,40 @@ pub enum ConservativeDepth {
 
     /// Shader may not rewrite depth value.
     Unchanged,
+}
+
+/// Stage of the programmable pipeline.
+#[derive(Clone, Copy, Debug, Hash, Eq, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub enum ShaderStage {
+    /// A vertex shader, in a render pipeline.
+    Vertex,
+
+    /// A task shader, in a mesh render pipeline.
+    Task,
+
+    /// A mesh shader, in a mesh render pipeline.
+    Mesh,
+
+    /// A fragment shader, in a render pipeline.
+    Fragment,
+
+    /// Compute pipeline shader.
+    Compute,
+
+    /// A ray generation shader, in a ray tracing pipeline.
+    RayGeneration,
+
+    /// A miss shader, in a ray tracing pipeline.
+    Miss,
+
+    /// A any hit shader, in a ray tracing pipeline.
+    AnyHit,
+
+    /// A closest hit shader, in a ray tracing pipeline.
+    ClosestHit,
 }
 
 /// Addressing space of variables.
@@ -502,10 +522,6 @@ pub enum BuiltIn {
     /// the intersection function if any, otherwise this is 254 (0xFE) for a
     /// front facing triangle and 255 (0xFF) for a back facing triangle
     HitKind,
-    /// Read in closest hit and any hit shaders, the second and third barycentric
-    /// coordinates of the hit point on the triangle. The first can be computed as
-    /// `1.0 - x - y`. Only meaningful if the hit was a triangle.
-    HitBarycentrics,
 }
 
 /// Number of bytes per scalar.
@@ -1143,6 +1159,18 @@ pub enum Binding {
         /// non-interpolated normal vector.
         per_primitive: bool,
     },
+}
+
+/// Pipeline binding information for global resources.
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "serialize", derive(Serialize))]
+#[cfg_attr(feature = "deserialize", derive(Deserialize))]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub struct ResourceBinding {
+    /// The bind group index.
+    pub group: u32,
+    /// Binding number within the group.
+    pub binding: u32,
 }
 
 /// Variable defined at module level.
@@ -2009,14 +2037,6 @@ pub enum RayQueryFunction {
     ConfirmIntersection,
 
     Terminate,
-
-    /// Resets a variable's to appear as though it was previously unused.
-    ///
-    /// For most types in variables which don't have initialisers, a zero store
-    /// is fine when resetting a variable in a loop (as functions always have
-    /// their variables outside all blocks while wgsl and others can have blocks
-    /// in loops) but ray queries cannot be stored to nor can be zero initialized.
-    Begin,
 }
 
 //TODO: consider removing `Clone`. It's not valid to clone `Statement::Emit` anyway.
@@ -2423,12 +2443,6 @@ pub struct FunctionResult {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub struct Function {
     /// Name of the function, if any.
-    ///
-    /// Unlike WGSL, Naga IR allows a module to have multiple functions with the
-    /// same name. Since functions are generally identified by handle, the name
-    /// is mostly needed for diagnostics and as a hint to [`Namer`].
-    ///
-    /// [`Namer`]: crate::proc::Namer
     pub name: Option<String>,
     /// Information about function argument.
     pub arguments: Vec<FunctionArgument>,
@@ -2520,9 +2534,7 @@ pub struct Function {
 pub struct EntryPoint {
     /// Name of this entry point, visible externally.
     ///
-    /// Unlike WGSL, Naga IR allows a module to have multiple entry points with
-    /// the same name, as long as they are for different shader stages. That is,
-    /// `(name, stage)` pairs must be distinct within a module.
+    /// Entry point names for a given `stage` must be distinct within a module.
     pub name: String,
     /// Shader stage.
     pub stage: ShaderStage,

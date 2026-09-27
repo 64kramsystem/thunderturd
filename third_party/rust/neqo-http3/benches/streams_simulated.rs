@@ -4,7 +4,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Benchmark over a simulated network, measuring instruction count via CodSpeed.
+//! Benchmark with simulated time, i.e., measure the network protocol efficiency.
+//!
+//! Given that this uses simulated time, we can measure actual throughput.
 
 #![expect(
     clippy::significant_drop_tightening,
@@ -17,7 +19,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 mod common;
 
 fn benchmark(c: &mut Criterion) {
-    common::bench(c, "simulated");
+    common::simulated(c);
 }
 
 criterion_group!(benches, benchmark);

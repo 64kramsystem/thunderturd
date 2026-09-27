@@ -3,12 +3,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use crate::bit_reader::BitReader;
-use crate::entropy_coding::context_map::*;
-use crate::entropy_coding::decode::unpack_signed;
-use crate::error::{Error, Result};
-use crate::frame::coeff_order::NUM_ORDERS;
-use crate::util::ShiftRightCeil;
+use crate::{
+    bit_reader::BitReader,
+    entropy_coding::{context_map::*, decode::unpack_signed},
+    error::{Error, Result},
+    frame::coeff_order::NUM_ORDERS,
+    util::ShiftRightCeil,
+};
 
 pub const NON_ZERO_BUCKETS: usize = 37;
 

@@ -3,12 +3,11 @@
 use crate::de::TEXT_KEY;
 use crate::se::element::{ElementSerializer, Struct, Tuple};
 use crate::se::simple_type::{QuoteTarget, SimpleTypeSerializer};
-use crate::se::{
-    EmptyElementHandling, Indent, QuoteLevel, SeError, TextFormat, WriteResult, XmlName,
-};
+use crate::se::{Indent, QuoteLevel, SeError, WriteResult, XmlName};
 use serde::ser::{
     Impossible, Serialize, SerializeSeq, SerializeTuple, SerializeTupleStruct, Serializer,
 };
+use serde::serde_if_integer128;
 use std::fmt::Write;
 
 macro_rules! write_primitive {
@@ -50,7 +49,7 @@ macro_rules! write_primitive {
 ///     [`SimpleTypeSerializer`] (`$text` fields). In particular, the empty struct
 ///     is serialized as `<variant/>`;
 ///
-/// Usage of empty tags depends on the [`Self::empty_element_handling`] setting.
+/// Usage of empty tags depends on the [`Self::expand_empty_elements`] setting.
 ///
 /// The difference between this serializer and [`SimpleTypeSerializer`] is in how
 /// sequences and maps are serialized. Unlike `SimpleTypeSerializer` it supports
@@ -72,8 +71,6 @@ pub struct ContentSerializer<'w, 'i, W: Write> {
     /// If `true`, then current indent will be written before writing the content,
     /// but only if content is not empty. This flag is reset after writing indent.
     pub write_indent: bool,
-    /// Defines how text content should be serialized (as escaped text or CDATA)
-    pub text_format: TextFormat,
     /// If `true`, then primitive types that serializes to a text content without
     /// surrounding tag will be allowed, otherwise the [`SeError::Unsupported`]
     /// will be returned.
@@ -82,20 +79,19 @@ pub struct ContentSerializer<'w, 'i, W: Write> {
     /// as a text that makes it impossible to distinguish between them during
     /// deserialization. Instead of ambiguous serialization the error is returned.
     pub allow_primitive: bool,
-    /// Specifies how empty elements are written.
-    pub empty_element_handling: EmptyElementHandling,
+    // If `true`, then empty elements will be serialized as `<element></element>`
+    // instead of `<element/>`.
+    pub expand_empty_elements: bool,
 }
 
 impl<'w, 'i, W: Write> ContentSerializer<'w, 'i, W> {
     /// Turns this serializer into serializer of a text content
     #[inline]
     pub fn into_simple_type_serializer_impl(self) -> SimpleTypeSerializer<&'w mut W> {
+        //TODO: Customization point: choose between CDATA and Text representation
         SimpleTypeSerializer {
             writer: self.writer,
-            target: match self.text_format {
-                TextFormat::Text => QuoteTarget::Text,
-                TextFormat::CData => QuoteTarget::CData,
-            },
+            target: QuoteTarget::Text,
             level: self.level,
         }
     }
@@ -114,18 +110,14 @@ impl<'w, 'i, W: Write> ContentSerializer<'w, 'i, W> {
     /// Creates new serializer that shares state with this serializer and
     /// writes to the same underlying writer
     #[inline]
-    pub fn new_seq_element_serializer(
-        &mut self,
-        allow_primitive: bool,
-    ) -> ContentSerializer<'_, '_, W> {
+    pub fn new_seq_element_serializer(&mut self, allow_primitive: bool) -> ContentSerializer<W> {
         ContentSerializer {
             writer: self.writer,
             level: self.level,
             indent: self.indent.borrow(),
             write_indent: self.write_indent,
-            text_format: self.text_format,
             allow_primitive,
-            empty_element_handling: self.empty_element_handling,
+            expand_empty_elements: self.expand_empty_elements,
         }
     }
 
@@ -133,27 +125,17 @@ impl<'w, 'i, W: Write> ContentSerializer<'w, 'i, W> {
     #[inline]
     pub(super) fn write_empty(mut self, name: XmlName) -> Result<WriteResult, SeError> {
         self.write_indent()?;
-
-        match self.empty_element_handling {
-            EmptyElementHandling::SelfClosed => {
-                self.writer.write_char('<')?;
-                self.writer.write_str(name.0)?;
-                self.writer.write_str("/>")?;
-            }
-            EmptyElementHandling::SelfClosedWithSpace => {
-                self.writer.write_char('<')?;
-                self.writer.write_str(name.0)?;
-                self.writer.write_str(" />")?;
-            }
-            EmptyElementHandling::Expanded => {
-                self.writer.write_char('<')?;
-                self.writer.write_str(name.0)?;
-                self.writer.write_str("></")?;
-                self.writer.write_str(name.0)?;
-                self.writer.write_char('>')?;
-            }
+        if self.expand_empty_elements {
+            self.writer.write_char('<')?;
+            self.writer.write_str(name.0)?;
+            self.writer.write_str("></")?;
+            self.writer.write_str(name.0)?;
+            self.writer.write_char('>')?;
+        } else {
+            self.writer.write_str("<")?;
+            self.writer.write_str(name.0)?;
+            self.writer.write_str("/>")?;
         }
-
         Ok(WriteResult::Element)
     }
 
@@ -197,7 +179,7 @@ impl<'w, 'i, W: Write> Serializer for ContentSerializer<'w, 'i, W> {
     type SerializeTupleStruct = Seq<'w, 'i, W>;
     type SerializeTupleVariant = Tuple<'w, 'i, W>;
     type SerializeMap = Impossible<Self::Ok, Self::Error>;
-    type SerializeStruct = Struct<'w, 'i, W>;
+    type SerializeStruct = Impossible<Self::Ok, Self::Error>;
     type SerializeStructVariant = Struct<'w, 'i, W>;
 
     write_primitive!(serialize_bool(bool));
@@ -212,8 +194,10 @@ impl<'w, 'i, W: Write> Serializer for ContentSerializer<'w, 'i, W> {
     write_primitive!(serialize_u32(u32));
     write_primitive!(serialize_u64(u64));
 
-    write_primitive!(serialize_i128(i128));
-    write_primitive!(serialize_u128(u128));
+    serde_if_integer128! {
+        write_primitive!(serialize_i128(i128));
+        write_primitive!(serialize_u128(u128));
+    }
 
     write_primitive!(serialize_f32(f32));
     write_primitive!(serialize_f64(f64));
@@ -368,13 +352,11 @@ impl<'w, 'i, W: Write> Serializer for ContentSerializer<'w, 'i, W> {
     fn serialize_struct(
         self,
         name: &'static str,
-        len: usize,
+        _len: usize,
     ) -> Result<Self::SerializeStruct, Self::Error> {
-        ElementSerializer {
-            ser: self,
-            key: XmlName::try_from(name)?,
-        }
-        .serialize_struct(name, len)
+        Err(SeError::Unsupported(
+            format!("serialization of struct `{name}` is not supported in `$value` field").into(),
+        ))
     }
 
     /// Serializes variant as an element with name `variant`, producing
@@ -613,9 +595,8 @@ pub(super) mod tests {
                         level: QuoteLevel::Full,
                         indent: Indent::None,
                         write_indent: false,
-                        text_format: TextFormat::Text,
                         allow_primitive: true,
-                        empty_element_handling: EmptyElementHandling::SelfClosed,
+                        expand_empty_elements: false,
                     };
 
                     let result = $data.serialize(ser).unwrap();
@@ -637,9 +618,8 @@ pub(super) mod tests {
                         level: QuoteLevel::Full,
                         indent: Indent::None,
                         write_indent: false,
-                        text_format: TextFormat::Text,
                         allow_primitive: true,
-                        empty_element_handling: EmptyElementHandling::SelfClosed,
+                        expand_empty_elements: false,
                     };
 
                     match $data.serialize(ser).unwrap_err() {
@@ -665,16 +645,18 @@ pub(super) mod tests {
         serialize_as!(i16_:   -4200i16             => "-4200", Text);
         serialize_as!(i32_:   -42000000i32         => "-42000000", Text);
         serialize_as!(i64_:   -42000000000000i64   => "-42000000000000", Text);
-        serialize_as!(isize_: -42000000isize       => "-42000000", Text);
+        serialize_as!(isize_: -42000000000000isize => "-42000000000000", Text);
 
         serialize_as!(u8_:    42u8                => "42", Text);
         serialize_as!(u16_:   4200u16             => "4200", Text);
         serialize_as!(u32_:   42000000u32         => "42000000", Text);
         serialize_as!(u64_:   42000000000000u64   => "42000000000000", Text);
-        serialize_as!(usize_: 42000000usize       => "42000000", Text);
+        serialize_as!(usize_: 42000000000000usize => "42000000000000", Text);
 
-        serialize_as!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000", Text);
-        serialize_as!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000", Text);
+        serde_if_integer128! {
+            serialize_as!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000", Text);
+            serialize_as!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000", Text);
+        }
 
         serialize_as!(f32_: 4.2f32 => "4.2", Text);
         serialize_as!(f64_: 4.2f64 => "4.2", Text);
@@ -725,13 +707,8 @@ pub(super) mod tests {
         // only `enum` can provide
         err!(map: BTreeMap::from([("_1", 2), ("_3", 4)])
             => Unsupported("serialization of map types is not supported in `$value` field"));
-        serialize_as!(struct_: Struct { key: "answer", val: (42, 42) }
-            => "<Struct>\
-                    <key>answer</key>\
-                    <val>42</val>\
-                    <val>42</val>\
-                </Struct>");
-
+        err!(struct_: Struct { key: "answer", val: (42, 42) }
+            => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
         serialize_as!(enum_struct: Enum::Struct { key: "answer", val: (42, 42) }
             => "<Struct>\
                     <key>answer</key>\
@@ -746,17 +723,13 @@ pub(super) mod tests {
 
             err!(map: BTreeMap::from([("$text", 2), ("_3", 4)])
                 => Unsupported("serialization of map types is not supported in `$value` field"));
-            serialize_as!(struct_:
+            err!(struct_:
                 Text {
                     before: "answer",
                     content: (42, 42),
                     after: "answer",
                 }
-                => "<Text>\
-                        <before>answer</before>\
-                        42 42\
-                        <after>answer</after>\
-                    </Text>");
+                => Unsupported("serialization of struct `Text` is not supported in `$value` field"));
             serialize_as!(enum_struct:
                 SpecialEnum::Text {
                     before: "answer",
@@ -798,16 +771,18 @@ pub(super) mod tests {
             text!(i16_:   -4200i16             => "-4200");
             text!(i32_:   -42000000i32         => "-42000000");
             text!(i64_:   -42000000000000i64   => "-42000000000000");
-            text!(isize_: -42000000isize       => "-42000000");
+            text!(isize_: -42000000000000isize => "-42000000000000");
 
             text!(u8_:    42u8                => "42");
             text!(u16_:   4200u16             => "4200");
             text!(u32_:   42000000u32         => "42000000");
             text!(u64_:   42000000000000u64   => "42000000000000");
-            text!(usize_: 42000000usize       => "42000000");
+            text!(usize_: 42000000000000usize => "42000000000000");
 
-            text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-            text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            serde_if_integer128! {
+                text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            }
 
             text!(f32_: 4.2f32 => "4.2");
             text!(f64_: 4.2f64 => "4.2");
@@ -921,16 +896,18 @@ pub(super) mod tests {
             value!(i16_:   -4200i16             => "-4200");
             value!(i32_:   -42000000i32         => "-42000000");
             value!(i64_:   -42000000000000i64   => "-42000000000000");
-            value!(isize_: -42000000isize       => "-42000000");
+            value!(isize_: -42000000000000isize => "-42000000000000");
 
             value!(u8_:    42u8                => "42");
             value!(u16_:   4200u16             => "4200");
             value!(u32_:   42000000u32         => "42000000");
             value!(u64_:   42000000000000u64   => "42000000000000");
-            value!(usize_: 42000000usize       => "42000000");
+            value!(usize_: 42000000000000usize => "42000000000000");
 
-            value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-            value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            serde_if_integer128! {
+                value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            }
 
             value!(f32_: 4.2f32 => "4.2");
             value!(f64_: 4.2f64 => "4.2");
@@ -1010,21 +987,13 @@ pub(super) mod tests {
                     after: "answer",
                 }
                 => Unsupported("serialization of map types is not supported in `$value` field"));
-            value!(struct_:
+            err!(struct_:
                 SpecialEnum::Value {
                     before: "answer",
                     content: Struct { key: "answer", val: (42, 42) },
                     after: "answer",
                 }
-                => "<Value>\
-                        <before>answer</before>\
-                        <Struct>\
-                            <key>answer</key>\
-                            <val>42</val>\
-                            <val>42</val>\
-                        </Struct>\
-                        <after>answer</after>\
-                    </Value>");
+                => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
             value!(enum_struct:
                 Enum::Struct { key: "answer", val: (42, 42) }
                 => "<Struct>\
@@ -1043,12 +1012,12 @@ pub(super) mod tests {
             err!(map_mixed: BTreeMap::from([("@key1", 1), ("key2", 2)])
                 => Unsupported("serialization of map types is not supported in `$value` field"));
 
-            serialize_as!(struct_: Attributes { key: "answer", val: (42, 42) }
-                => r#"<Attributes key="answer" val="42 42"/>"#);
-            serialize_as!(struct_before: AttributesBefore { key: "answer", val: 42 }
-                => r#"<AttributesBefore key="answer"><val>42</val></AttributesBefore>"#);
-            serialize_as!(struct_after: AttributesAfter { key: "answer", val: 42 }
-                => r#"<AttributesAfter val="42"><key>answer</key></AttributesAfter>"#);
+            err!(struct_: Attributes { key: "answer", val: (42, 42) }
+                => Unsupported("serialization of struct `Attributes` is not supported in `$value` field"));
+            err!(struct_before: AttributesBefore { key: "answer", val: 42 }
+                => Unsupported("serialization of struct `AttributesBefore` is not supported in `$value` field"));
+            err!(struct_after: AttributesAfter { key: "answer", val: 42 }
+                => Unsupported("serialization of struct `AttributesAfter` is not supported in `$value` field"));
 
             serialize_as!(enum_: Enum::Attributes { key: "answer", val: (42, 42) }
                 => r#"<Attributes key="answer" val="42 42"/>"#);
@@ -1079,9 +1048,8 @@ pub(super) mod tests {
                         level: QuoteLevel::Full,
                         indent: Indent::Owned(Indentation::new(b' ', 2)),
                         write_indent: false,
-                        text_format: TextFormat::Text,
                         allow_primitive: true,
-                        empty_element_handling: EmptyElementHandling::SelfClosed,
+                        expand_empty_elements: false,
                     };
 
                     let result = $data.serialize(ser).unwrap();
@@ -1103,9 +1071,8 @@ pub(super) mod tests {
                         level: QuoteLevel::Full,
                         indent: Indent::Owned(Indentation::new(b' ', 2)),
                         write_indent: false,
-                        text_format: TextFormat::Text,
                         allow_primitive: true,
-                        empty_element_handling: EmptyElementHandling::SelfClosed,
+                        expand_empty_elements: false,
                     };
 
                     match $data.serialize(ser).unwrap_err() {
@@ -1130,16 +1097,18 @@ pub(super) mod tests {
         serialize_as!(i16_:   -4200i16             => "-4200", Text);
         serialize_as!(i32_:   -42000000i32         => "-42000000", Text);
         serialize_as!(i64_:   -42000000000000i64   => "-42000000000000", Text);
-        serialize_as!(isize_: -42000000isize       => "-42000000", Text);
+        serialize_as!(isize_: -42000000000000isize => "-42000000000000", Text);
 
         serialize_as!(u8_:    42u8                => "42", Text);
         serialize_as!(u16_:   4200u16             => "4200", Text);
         serialize_as!(u32_:   42000000u32         => "42000000", Text);
         serialize_as!(u64_:   42000000000000u64   => "42000000000000", Text);
-        serialize_as!(usize_: 42000000usize       => "42000000", Text);
+        serialize_as!(usize_: 42000000000000usize => "42000000000000", Text);
 
-        serialize_as!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000", Text);
-        serialize_as!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000", Text);
+        serde_if_integer128! {
+            serialize_as!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000", Text);
+            serialize_as!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000", Text);
+        }
 
         serialize_as!(f32_: 4.2f32 => "4.2", Text);
         serialize_as!(f64_: 4.2f64 => "4.2", Text);
@@ -1188,12 +1157,8 @@ pub(super) mod tests {
         // only `enum` can provide
         err!(map: BTreeMap::from([("_1", 2), ("_3", 4)])
             => Unsupported("serialization of map types is not supported in `$value` field"));
-        serialize_as!(struct_: Struct { key: "answer", val: (42, 42) }
-            => "<Struct>\n  \
-                    <key>answer</key>\n  \
-                    <val>42</val>\n  \
-                    <val>42</val>\n\
-                </Struct>");
+        err!(struct_: Struct { key: "answer", val: (42, 42) }
+            => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
         serialize_as!(enum_struct: Enum::Struct { key: "answer", val: (42, 42) }
             => "<Struct>\n  \
                     <key>answer</key>\n  \
@@ -1208,15 +1173,13 @@ pub(super) mod tests {
 
             err!(map: BTreeMap::from([("$text", 2), ("_3", 4)])
                 => Unsupported("serialization of map types is not supported in `$value` field"));
-            serialize_as!(struct_:
+            err!(struct_:
                 Text {
                     before: "answer",
                     content: (42, 42),
                     after: "answer",
                 }
-                => "<Text>\n  \
-                        <before>answer</before>42 42<after>answer</after>\n\
-                    </Text>");
+                => Unsupported("serialization of struct `Text` is not supported in `$value` field"));
             serialize_as!(enum_struct:
                 SpecialEnum::Text {
                     before: "answer",
@@ -1256,16 +1219,18 @@ pub(super) mod tests {
             text!(i16_:   -4200i16             => "-4200");
             text!(i32_:   -42000000i32         => "-42000000");
             text!(i64_:   -42000000000000i64   => "-42000000000000");
-            text!(isize_: -42000000isize       => "-42000000");
+            text!(isize_: -42000000000000isize => "-42000000000000");
 
             text!(u8_:    42u8                => "42");
             text!(u16_:   4200u16             => "4200");
             text!(u32_:   42000000u32         => "42000000");
             text!(u64_:   42000000000000u64   => "42000000000000");
-            text!(usize_: 42000000usize       => "42000000");
+            text!(usize_: 42000000000000usize => "42000000000000");
 
-            text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-            text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            serde_if_integer128! {
+                text!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                text!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            }
 
             text!(f32_: 4.2f32 => "4.2");
             text!(f64_: 4.2f64 => "4.2");
@@ -1379,16 +1344,18 @@ pub(super) mod tests {
             value!(i16_:   -4200i16             => "-4200");
             value!(i32_:   -42000000i32         => "-42000000");
             value!(i64_:   -42000000000000i64   => "-42000000000000");
-            value!(isize_: -42000000isize       => "-42000000");
+            value!(isize_: -42000000000000isize => "-42000000000000");
 
             value!(u8_:    42u8                => "42");
             value!(u16_:   4200u16             => "4200");
             value!(u32_:   42000000u32         => "42000000");
             value!(u64_:   42000000000000u64   => "42000000000000");
-            value!(usize_: 42000000usize => "42000000");
+            value!(usize_: 42000000000000usize => "42000000000000");
 
-            value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
-            value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            serde_if_integer128! {
+                value!(i128_: -420000000000000000000000000000i128 => "-420000000000000000000000000000");
+                value!(u128_:  420000000000000000000000000000u128 => "420000000000000000000000000000");
+            }
 
             value!(f32_: 4.2f32 => "4.2");
             value!(f64_: 4.2f64 => "4.2");
@@ -1469,22 +1436,13 @@ pub(super) mod tests {
                     after: "answer",
                 }
                 => Unsupported("serialization of map types is not supported in `$value` field"));
-            value!(struct_:
+            err!(struct_:
                 SpecialEnum::Value {
                     before: "answer",
                     content: Struct { key: "answer", val: (42, 42) },
                     after: "answer",
                 }
-                => "\n  \
-                    <Value>\n    \
-                        <before>answer</before>\n    \
-                        <Struct>\n      \
-                            <key>answer</key>\n      \
-                            <val>42</val>\n      \
-                            <val>42</val>\n    \
-                        </Struct>\n    \
-                        <after>answer</after>\n  \
-                    </Value>\n  ");
+                => Unsupported("serialization of struct `Struct` is not supported in `$value` field"));
             value!(enum_struct:
                 Enum::Struct { key: "answer", val: (42, 42) }
                 => "\n  \
@@ -1504,16 +1462,12 @@ pub(super) mod tests {
             err!(map_mixed: BTreeMap::from([("@key1", 1), ("key2", 2)])
                 => Unsupported("serialization of map types is not supported in `$value` field"));
 
-            serialize_as!(struct_: Attributes { key: "answer", val: (42, 42) }
-                => r#"<Attributes key="answer" val="42 42"/>"#);
-            serialize_as!(struct_before: AttributesBefore { key: "answer", val: 42 }
-                => "<AttributesBefore key=\"answer\">\n  \
-                        <val>42</val>\n\
-                    </AttributesBefore>");
-            serialize_as!(struct_after: AttributesAfter { key: "answer", val: 42 }
-                => "<AttributesAfter val=\"42\">\n  \
-                        <key>answer</key>\n\
-                    </AttributesAfter>");
+            err!(struct_: Attributes { key: "answer", val: (42, 42) }
+                => Unsupported("serialization of struct `Attributes` is not supported in `$value` field"));
+            err!(struct_before: AttributesBefore { key: "answer", val: 42 }
+                => Unsupported("serialization of struct `AttributesBefore` is not supported in `$value` field"));
+            err!(struct_after: AttributesAfter { key: "answer", val: 42 }
+                => Unsupported("serialization of struct `AttributesAfter` is not supported in `$value` field"));
 
             serialize_as!(enum_: Enum::Attributes { key: "answer", val: (42, 42) }
                 => r#"<Attributes key="answer" val="42 42"/>"#);

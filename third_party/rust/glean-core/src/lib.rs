@@ -3,7 +3,6 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #![allow(clippy::doc_overindented_list_items)]
-#![allow(clippy::large_const_arrays)] // `UNIFFI_META_CONST_UDL_GLEAN`
 #![allow(clippy::significant_drop_in_scrutinee)]
 #![allow(clippy::uninlined_format_args)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -53,7 +52,6 @@ mod internal_pings;
 pub mod metrics;
 pub mod ping;
 mod scheduler;
-pub(crate) mod session;
 pub mod storage;
 mod system;
 #[doc(hidden)]
@@ -65,7 +63,7 @@ mod util;
 #[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
 mod fd_logger;
 
-pub use crate::common_metric_data::{CommonMetricData, Lifetime, MetricLabel};
+pub use crate::common_metric_data::{CommonMetricData, DynamicLabelType, Lifetime};
 pub use crate::core::Glean;
 pub use crate::core_metrics::{AttributionMetrics, ClientInfoMetrics, DistributionMetrics};
 use crate::dispatcher::is_test_mode;
@@ -87,7 +85,6 @@ pub use crate::metrics::{
     TestGetValue, TextMetric, TimeUnit, TimerId, TimespanMetric, TimingDistributionMetric,
     UrlMetric, UuidMetric,
 };
-pub use crate::session::{SessionManager, SessionMetadata, SessionMode};
 pub use crate::upload::{PingRequest, PingUploadTask, UploadResult, UploadTaskAction};
 
 const GLEAN_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -117,8 +114,6 @@ static PRE_INIT_PING_ENABLED: Mutex<Vec<(metrics::PingType, bool)>> = Mutex::new
 /// Keep track of attribution and distribution supplied before Glean is initialized.
 static PRE_INIT_ATTRIBUTION: Mutex<Option<AttributionMetrics>> = Mutex::new(None);
 static PRE_INIT_DISTRIBUTION: Mutex<Option<DistributionMetrics>> = Mutex::new(None);
-static PRE_INIT_ATTRIBUTION_CLEARED: AtomicBool = AtomicBool::new(false);
-static PRE_INIT_DISTRIBUTION_CLEARED: AtomicBool = AtomicBool::new(false);
 
 /// Global singleton of the handles of the glean.init threads.
 /// For joining. For tests.
@@ -171,21 +166,6 @@ pub struct InternalConfiguration {
     pub ping_lifetime_threshold: u64,
     /// After what time to auto-flush. 0 disables it.
     pub ping_lifetime_max_time: u64,
-    /// Maximum number of pending pings on disk. Overrides the default when set.
-    pub max_pending_pings_count: Option<u64>,
-    /// Maximum size in bytes of the pending pings directory. Overrides the default when set.
-    pub max_pending_pings_directory_size: Option<u64>,
-    /// Session management mode. Default: `Auto`.
-    pub session_mode: session::SessionMode,
-    /// The fraction of sessions to sample (0.0–1.0). Default: `1.0` (all sessions).
-    pub session_sample_rate: f64,
-    /// Inactivity timeout in milliseconds for AUTO mode before a new session starts.
-    /// Default: 1 800 000 ms (30 minutes).
-    pub session_inactivity_timeout_ms: u64,
-    /// The number of "events" pings to accelerate each session, plus one.
-    pub events_ping_acceleration_factor: Option<u32>,
-    /// Whether to store submitted pings. Default: false
-    pub enable_store_submitted_pings: bool,
 }
 
 /// How to specify the rate at which pings may be uploaded before they are throttled.
@@ -489,13 +469,6 @@ fn initialize_inner(
             dirty_flag = glean.is_dirty_flag_set();
             glean.set_dirty_flag(false);
 
-            // Session crash recovery: if the dirty flag was set, the previous
-            // run ended abnormally. Emit a synthetic session_end for any
-            // persisted session.
-            if dirty_flag {
-                glean.recover_session_on_dirty_flag();
-            }
-
             // Perform registration of pings that were attempted to be
             // registered before init.
             let pings = PRE_INIT_PING_REGISTRATION.lock().unwrap();
@@ -507,16 +480,8 @@ fn initialize_inner(
                 glean.set_ping_enabled(ping, *enabled);
             }
 
-            // The attribution and distribution might have been cleared or set before initialize,
-            // clear if necessary, and then take the cached values and set them.
-            let clear_attribution = PRE_INIT_ATTRIBUTION_CLEARED.load(Ordering::SeqCst);
-            if clear_attribution {
-                glean.clear_attribution();
-            }
-            let clear_distribution = PRE_INIT_DISTRIBUTION_CLEARED.load(Ordering::SeqCst);
-            if clear_distribution {
-                glean.clear_distribution();
-            }
+            // The attribution and distribution might have been set before initialize,
+            // take the cached values and set them.
             if let Some(attribution) = PRE_INIT_ATTRIBUTION.lock().unwrap().take() {
                 glean.update_attribution(attribution);
             }
@@ -791,22 +756,10 @@ pub fn shutdown() {
     uploader_shutdown();
 
     // Be sure to call this _after_ draining the dispatcher
-    core::with_glean_mut(|glean| {
+    core::with_glean(|glean| {
         if let Err(e) = glean.persist_ping_lifetime_data() {
             log::info!("Can't persist ping lifetime data: {:?}", e);
         }
-
-        #[cfg(feature = "sqlite")]
-        if let Some(database) = &glean.data_store {
-            if let Err(e) = database.cleanup_submitted_pings(None) {
-                log::info!("Could not clean up submitted_pings table: {:?}", e);
-            }
-            if let Err(e) = database.run_maintenance(false) {
-                log::info!("Can't run database maintenance on shutdown: {:?}", e);
-            }
-        }
-
-        glean.close_db();
     });
 }
 
@@ -969,95 +922,6 @@ pub fn glean_set_upload_enabled(enabled: bool) {
 /// This replaces `set_upload_enabled`.
 pub fn glean_set_collection_enabled(enabled: bool) {
     glean_set_upload_enabled(enabled)
-}
-
-/// Sets whether Glean should store submitted pings or not.
-pub fn glean_set_store_submitted_pings_enabled(enabled: bool) {
-    if !was_initialize_called() {
-        return;
-    }
-
-    launch_with_glean_mut(move |glean| {
-        glean.store_submitted_pings_enabled = enabled;
-    });
-}
-
-/// A submitted ping that has been stored by Glean.
-pub struct SubmittedPing {
-    /// The document ID (unique identifier)
-    pub document_id: String,
-    /// The ping's name
-    pub ping: String,
-    /// RFC3339 datetime string
-    pub submitted_date: String,
-    /// Optional RFC3339 datetime string
-    pub uploaded_date: Option<String>,
-    /// Whether the upload failed unrecoverably or not
-    pub upload_failed: Option<String>,
-    /// The ping's payload
-    pub payload: Option<JsonValue>,
-}
-
-#[cfg(feature = "sqlite")]
-impl From<database::sqlite::SubmittedPing> for SubmittedPing {
-    fn from(value: database::sqlite::SubmittedPing) -> Self {
-        SubmittedPing {
-            document_id: value.document_id.clone(),
-            ping: value.ping.clone(),
-            submitted_date: value.submitted_date.0.to_rfc3339(),
-            uploaded_date: value.uploaded_date.as_ref().map(|d| d.0.to_rfc3339()),
-            upload_failed: value.upload_failed.as_ref().map(|d| d.0.to_rfc3339()),
-            payload: value.payload(),
-        }
-    }
-}
-
-/// Returns a `Vec` containing all stored submitted pings.
-pub fn glean_get_all_stored_submitted_pings() -> Vec<SubmittedPing> {
-    #[cfg(feature = "sqlite")]
-    {
-        core::with_glean(|glean| glean.storage().get_all_submitted_pings())
-            .into_iter()
-            .map(|p| p.into())
-            .collect()
-    }
-
-    #[cfg(not(feature = "sqlite"))]
-    Vec::new()
-}
-
-/// Returns a `Vec` containing all stored submitted pings with the supplied name.
-///
-/// # Arguments
-///
-/// * `ping` - The name of the pings that should be returned.
-pub fn glean_get_stored_submitted_pings_by_name(ping: String) -> Vec<SubmittedPing> {
-    #[cfg(feature = "sqlite")]
-    {
-        core::with_glean(|glean| glean.storage().get_submitted_pings_by_name(&ping))
-            .into_iter()
-            .map(|p| p.into())
-            .collect()
-    }
-
-    #[cfg(not(feature = "sqlite"))]
-    {
-        _ = ping;
-        Vec::new()
-    }
-}
-
-/// Clears the stored submitted pings.
-pub fn glean_clear_stored_submitted_pings() {
-    #[cfg(feature = "sqlite")]
-    launch_with_glean(|glean| {
-        if let Err(e) = glean
-            .storage()
-            .cleanup_submitted_pings(Some(chrono::Utc::now()))
-        {
-            log::warn!("Unable to clear stored submitted pings: {:?}", e);
-        }
-    });
 }
 
 /// Enable or disable a ping.
@@ -1332,33 +1196,6 @@ pub fn glean_handle_client_inactive() {
     })
 }
 
-/// Starts a session manually.
-///
-/// Only has effect in `SessionMode::Manual`. Calling this in `Auto` or
-/// `Lifecycle` mode is a no-op to prevent corrupting automatic session state.
-pub fn glean_session_start() {
-    launch_with_glean_mut(|glean| {
-        if glean.session_manager.mode == session::SessionMode::Manual {
-            glean.session_start();
-        }
-    });
-}
-
-/// Ends a session manually.
-///
-/// Only has effect in `SessionMode::Manual`. Calling this in `Auto` or
-/// `Lifecycle` mode is a no-op to prevent corrupting automatic session state.
-///
-/// `reason` is an optional application-provided string attached to the
-/// `glean.session_end` boundary event for downstream analysis.
-pub fn glean_session_end(reason: Option<String>) {
-    launch_with_glean_mut(move |glean| {
-        if glean.session_manager.mode == session::SessionMode::Manual {
-            glean.session_end(reason.as_deref());
-        }
-    });
-}
-
 /// Collect and submit a ping for eventual upload by name.
 pub fn glean_submit_ping_by_name(ping_name: String, reason: Option<String>) {
     dispatcher::launch(|| {
@@ -1443,7 +1280,7 @@ pub fn glean_test_destroy_glean(clear_stores: bool, data_path: Option<String>) {
                 if clear_stores {
                     glean.test_clear_all_stores()
                 }
-                glean.close_db()
+                glean.destroy_db()
             });
         }
 
@@ -1475,17 +1312,6 @@ pub fn glean_set_dirty_flag(new_value: bool) {
     core::with_glean(|glean| glean.set_dirty_flag(new_value))
 }
 
-/// Clears the core attribution data.
-/// Does not clear glean.attribution.ext (if present).
-pub fn glean_clear_attribution() {
-    if was_initialize_called() && core::global_glean().is_some() {
-        core::with_glean(|glean| glean.clear_attribution());
-    } else {
-        PRE_INIT_ATTRIBUTION_CLEARED.store(true, Ordering::SeqCst);
-        _ = PRE_INIT_ATTRIBUTION.lock().unwrap().take()
-    }
-}
-
 /// Updates attribution fields with new values.
 /// AttributionMetrics fields with `None` values will not overwrite older values.
 pub fn glean_update_attribution(attribution: AttributionMetrics) {
@@ -1507,17 +1333,6 @@ pub fn glean_update_attribution(attribution: AttributionMetrics) {
 pub fn glean_test_get_attribution() -> AttributionMetrics {
     join_init();
     core::with_glean(|glean| glean.test_get_attribution())
-}
-
-/// Clears the core distribution data.
-/// Does not clear glean.distribution.ext (if present).
-pub fn glean_clear_distribution() {
-    if was_initialize_called() && core::global_glean().is_some() {
-        core::with_glean(|glean| glean.clear_distribution());
-    } else {
-        PRE_INIT_DISTRIBUTION_CLEARED.store(true, Ordering::SeqCst);
-        _ = PRE_INIT_DISTRIBUTION.lock().unwrap().take()
-    }
 }
 
 /// Updates distribution fields with new values.
@@ -1749,27 +1564,30 @@ pub fn glean_enable_logging_to_fd(_fd: u64) {
     // intentionally left empty
 }
 
-// UNIFFI - START
+#[allow(missing_docs)]
+// uniffi-generated code should not be checked.
+#[allow(clippy::all)]
+mod ffi {
+    use super::*;
+    uniffi::include_scaffolding!("glean");
 
-uniffi::include_scaffolding!("glean");
+    type CowString = Cow<'static, str>;
 
-type CowString = Cow<'static, str>;
+    uniffi::custom_type!(CowString, String, {
+        remote,
+        lower: |s| s.into_owned(),
+        try_lift: |s| Ok(Cow::from(s))
+    });
 
-uniffi::custom_type!(CowString, String, {
-    remote,
-    lower: |s| s.into_owned(),
-    try_lift: |s| Ok(Cow::from(s))
-});
+    type JsonValue = serde_json::Value;
 
-type JsonValue = serde_json::Value;
-
-uniffi::custom_type!(JsonValue, String, {
-    remote,
-    lower: |s| serde_json::to_string(&s).unwrap(),
-    try_lift: |s| Ok(serde_json::from_str(&s)?)
-});
-
-// UNIFFI - END
+    uniffi::custom_type!(JsonValue, String, {
+        remote,
+        lower: |s| serde_json::to_string(&s).unwrap(),
+        try_lift: |s| Ok(serde_json::from_str(&s)?)
+    });
+}
+pub use ffi::*;
 
 // Split unit tests to a separate file, to reduce the file of this one.
 #[cfg(test)]

@@ -2,30 +2,14 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::fmt::Display;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use malloc_size_of_derive::MallocSizeOf;
 
-#[cfg(feature = "sqlite")]
-use rusqlite::Transaction;
-
 use crate::error::{Error, ErrorKind};
-#[cfg(feature = "sqlite")]
-use crate::error_recording::record_error_sqlite;
-
-#[cfg(feature = "sqlite")]
-use crate::metrics::{
-    dual_labeled_counter::validate_dual_label_sqlite, labeled::validate_dynamic_label_sqlite,
-};
-
-#[cfg(not(feature = "sqlite"))]
-use crate::metrics::{
-    dual_labeled_counter::validate_dual_label_rkv,
-    labeled::{combine_base_identifier_and_label, validate_dynamic_label_rkv},
-};
-#[cfg(feature = "sqlite")]
-use crate::ErrorType;
+use crate::metrics::dual_labeled_counter::validate_dynamic_key_and_or_category;
+use crate::metrics::labeled::validate_dynamic_label;
 use crate::Glean;
 use serde::{Deserialize, Serialize};
 
@@ -84,56 +68,44 @@ pub struct CommonMetricData {
     ///
     /// Disabled metrics are never recorded.
     pub disabled: bool,
-    /// Whether this metric is inside of the session scope.
+    /// Dynamic label.
     ///
-    /// `false` (the default) means this metric bypasses session sampling and
-    /// does not carry session metadata. Non-event metrics should use the default
-    /// for now. Event metrics that participate in session tracking must
-    /// explicitly set this to `true`.
-    pub in_session: bool,
-
-    /// Label for this metric.
-    ///
-    /// When a [`LabeledMetric<T>`](crate::metrics::LabeledMetric) factory
-    /// or [`DualLabeledCounterMetric`](crate::metrics::DualLabeledCounterMetric)
-    /// creates the specific metric to be recorded to,
-    /// labels are stored in the metric data
-    /// so that it can validated against the database later.
-    pub label: Option<MetricLabel>,
+    /// When a [`LabeledMetric<T>`](crate::metrics::LabeledMetric) factory creates the specific
+    /// metric to be recorded to, dynamic labels are stored in the specific
+    /// label so that we can validate them when the Glean singleton is
+    /// available.
+    pub dynamic_label: Option<DynamicLabelType>,
 }
 
 /// The type of dynamic label applied to a base metric. Used to help identify
 /// the necessary validation to be performed.
 #[derive(Debug, Clone, Deserialize, Serialize, MallocSizeOf, uniffi::Enum)]
-pub enum MetricLabel {
-    /// Static Label -- no validation required
-    Static(String),
+pub enum DynamicLabelType {
     /// A dynamic label applied from a `LabeledMetric`
     Label(String),
-    /// A label applied by a `DualLabeledCounter` that contains a dynamic key and static category
-    KeyOnly(String, String),
-    /// A label applied by a `DualLabeledCounter` that contains a static key and dynamic category
-    CategoryOnly(String, String),
+    /// A label applied by a `DualLabeledCounter` that contains a dynamic key
+    KeyOnly(String),
+    /// A label applied by a `DualLabeledCounter` that contains a dynamic category
+    CategoryOnly(String),
     /// A label applied by a `DualLabeledCounter` that contains a dynamic key and category
-    KeyAndCategory(String, String),
+    KeyAndCategory(String),
 }
 
-impl Default for MetricLabel {
+impl Default for DynamicLabelType {
     fn default() -> Self {
         Self::Label(String::new())
     }
 }
 
-impl Display for MetricLabel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use crate::metrics::dual_labeled_counter::RECORD_SEPARATOR;
+impl Deref for DynamicLabelType {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
         match self {
-            MetricLabel::Static(label) | MetricLabel::Label(label) => write!(f, "{label}"),
-            MetricLabel::KeyOnly(key, category)
-            | MetricLabel::CategoryOnly(key, category)
-            | MetricLabel::KeyAndCategory(key, category) => {
-                write!(f, "{key}{RECORD_SEPARATOR}{category}")
-            }
+            DynamicLabelType::Label(label) => label,
+            DynamicLabelType::KeyOnly(key) => key,
+            DynamicLabelType::CategoryOnly(category) => category,
+            DynamicLabelType::KeyAndCategory(key_and_category) => key_and_category,
         }
     }
 }
@@ -159,70 +131,6 @@ impl From<CommonMetricData> for CommonMetricDataInternal {
         Self {
             inner: input_data,
             disabled: AtomicU8::new(u8::from(disabled)),
-        }
-    }
-}
-
-/// A label checked for validity against label rules and against the database (for a specific metric).
-#[cfg(feature = "sqlite")]
-pub enum LabelCheck {
-    /// No label was supplied, no check done.
-    NoLabel,
-    /// Label was validated and is usable.
-    Label(String),
-    /// Label check errored, the provided replacement label should be used.
-    /// Errors can be recorded using [`LabelCheck::record_error`].
-    Error(String, i32),
-}
-
-#[cfg(feature = "sqlite")]
-impl LabelCheck {
-    /// Extract the label to be used (or an empty string if no label was checked)
-    pub fn label(&self) -> &str {
-        use LabelCheck::*;
-        match self {
-            NoLabel => "",
-            Label(label) | Error(label, _) => label,
-        }
-    }
-
-    /// Record the number of errors that were detected during the label check.
-    pub fn record_error(
-        &self,
-        glean: &Glean,
-        tx: &mut Transaction,
-        metric_name: &str,
-        send_in_pings: &[String],
-    ) {
-        let LabelCheck::Error(_, count) = self else {
-            return;
-        };
-
-        #[cfg(feature = "sqlite")]
-        record_error_sqlite(
-            glean,
-            tx,
-            metric_name,
-            send_in_pings,
-            ErrorType::InvalidLabel,
-            *count,
-        );
-
-        #[cfg(not(feature = "sqlite"))]
-        todo!()
-    }
-
-    /// Maps a `LabelCheck` by applying a function to the contained label (if any).
-    ///
-    /// This only maps over the already checked label.
-    /// No further label check is done.
-    fn map(self, mut f: impl FnMut(String) -> String) -> Self {
-        use LabelCheck::*;
-
-        match self {
-            NoLabel => NoLabel,
-            Label(s) => Label(f(s)),
-            Error(s, cnt) => Error(f(s), cnt),
         }
     }
 }
@@ -261,73 +169,24 @@ impl CommonMetricDataInternal {
     ///
     /// If `category` is empty, it's ommitted.
     /// Otherwise, it's the combination of the metric's `category`, `name` and `label`.
-    #[cfg(not(feature = "sqlite"))]
-    pub(crate) fn identifier(&self, glean: &Glean, record: bool) -> String {
+    pub(crate) fn identifier(&self, glean: &Glean) -> String {
         let base_identifier = self.base_identifier();
 
-        if let Some(label) = &self.inner.label {
-            let label = match label {
-                MetricLabel::Static(label) => label.to_string(),
-                MetricLabel::Label(label) => {
-                    validate_dynamic_label_rkv(glean, self, &base_identifier, label, record)
+        if let Some(label) = &self.inner.dynamic_label {
+            match label {
+                DynamicLabelType::Label(label) => {
+                    validate_dynamic_label(glean, self, &base_identifier, label)
                 }
-                MetricLabel::KeyOnly(..) => {
-                    validate_dual_label_rkv(glean, self, &base_identifier, label, record)
-                }
-                MetricLabel::CategoryOnly(..) => {
-                    validate_dual_label_rkv(glean, self, &base_identifier, label, record)
-                }
-                MetricLabel::KeyAndCategory(..) => {
-                    validate_dual_label_rkv(glean, self, &base_identifier, label, record)
-                }
-            };
-
-            combine_base_identifier_and_label(&base_identifier, &label)
+                _ => validate_dynamic_key_and_or_category(
+                    glean,
+                    self,
+                    &base_identifier,
+                    label.clone(),
+                ),
+            }
         } else {
             base_identifier
         }
-    }
-
-    /// Check the label for validity against the database.
-    ///
-    /// Returns the result of the check.
-    /// No error is recorded in the database if the check fails.
-    /// Extract the validated label, if any, using [`LabelCheck::label`].
-    /// Record an error, if any, using [`LabelCheck::record_error`].
-    #[cfg(feature = "sqlite")]
-    pub(crate) fn check_labels(&self, tx: &rusqlite::Connection) -> LabelCheck {
-        let base_identifier = self.base_identifier();
-
-        if let Some(label) = &self.inner.label {
-            match label {
-                MetricLabel::Static(label) => LabelCheck::Label(label.to_string()),
-                MetricLabel::Label(label) => {
-                    validate_dynamic_label_sqlite(tx, &base_identifier, label)
-                }
-                MetricLabel::KeyOnly(key, static_category) => {
-                    validate_dual_label_sqlite(tx, &base_identifier, key, "")
-                        .map(|key| format!("{key}{static_category}"))
-                }
-                MetricLabel::CategoryOnly(static_key, category) => {
-                    validate_dual_label_sqlite(tx, &base_identifier, "", category)
-                        .map(|category| format!("{static_key}{category}"))
-                }
-                MetricLabel::KeyAndCategory(key, category) => {
-                    validate_dual_label_sqlite(tx, &base_identifier, key, category)
-                }
-            }
-        } else {
-            LabelCheck::NoLabel
-        }
-    }
-
-    /// Whether or not the metric is `in_session`.
-    ///
-    /// Metrics that are `in_session` participate in session tracking and carry session metadata.
-    /// This is mostly relevant for event metrics, other metric types should generally not be `in_session`
-    /// and default to `false`.
-    pub fn in_session(&self) -> bool {
-        self.inner.in_session
     }
 
     /// The list of storages this metric should be recorded into.

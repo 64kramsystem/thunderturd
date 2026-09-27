@@ -41,7 +41,7 @@ bincode = "1.3"
 byteorder = "1"
 bytes = "1"
 crossbeam-queue = "0.3"
-cubeb = "0.34"
+cubeb = "0.32"
 log = "0.4"
 scopeguard = "1.1.0"
 serde = "1"
@@ -68,7 +68,7 @@ features = ["html_reports"]
 ashmem = "0.1.2"
 
 [target.'cfg(target_os = "linux")'.dependencies.audio_thread_priority]
-version = "0.37"
+version = "0.35"
 default-features = false
 
 [target."cfg(unix)".dependencies]

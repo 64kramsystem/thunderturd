@@ -156,7 +156,9 @@ impl<W: Write> BinaryWriter<W> {
         })?;
 
         let current_event_index = self.events.len() - 1;
-        let Event::Collection(c) = &mut self.events[collection_event_index] else {
+        let c = if let Event::Collection(c) = &mut self.events[collection_event_index] {
+            c
+        } else {
             unreachable!("items in `collection_stack` always point to a collection event");
         };
 
@@ -468,15 +470,15 @@ impl<W: Write> BinaryWriter<W> {
             }
             Value::Integer(v) => {
                 if let Some(v) = v.as_signed() {
-                    if let Ok(v) = u8::try_from(v) {
-                        self.writer.write_exact(&[0x10, v])?;
-                    } else if let Ok(v) = u16::try_from(v) {
+                    if v >= 0 && v <= i64::from(u8::max_value()) {
+                        self.writer.write_exact(&[0x10, v as u8])?;
+                    } else if v >= 0 && v <= i64::from(u16::max_value()) {
                         let mut buf: [_; 3] = [0x11, 0, 0];
-                        buf[1..].copy_from_slice(&v.to_be_bytes());
+                        buf[1..].copy_from_slice(&(v as u16).to_be_bytes());
                         self.writer.write_exact(&buf)?;
-                    } else if let Ok(v) = u32::try_from(v) {
+                    } else if v >= 0 && v <= i64::from(u32::max_value()) {
                         let mut buf: [_; 5] = [0x12, 0, 0, 0, 0];
-                        buf[1..].copy_from_slice(&v.to_be_bytes());
+                        buf[1..].copy_from_slice(&(v as u32).to_be_bytes());
                         self.writer.write_exact(&buf)?;
                     } else {
                         let mut buf: [_; 9] = [0x13, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -484,7 +486,7 @@ impl<W: Write> BinaryWriter<W> {
                         self.writer.write_exact(&buf)?;
                     }
                 } else if let Some(v) = v.as_unsigned() {
-                    // `u64`s larger than `i64::MAX` are stored as signed 128 bit
+                    // `u64`s larger than `i64::max_value()` are stored as signed 128 bit
                     // integers.
                     let mut buf: [_; 17] = [0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                     buf[1..].copy_from_slice(&i128::from(v).to_be_bytes());
@@ -512,15 +514,15 @@ impl<W: Write> BinaryWriter<W> {
             }
             Value::Uid(v) => {
                 let v = v.get();
-                if let Ok(v) = u8::try_from(v) {
-                    self.writer.write_exact(&[0x80, v])?;
-                } else if let Ok(v) = u16::try_from(v) {
+                if v <= u64::from(u8::max_value()) {
+                    self.writer.write_exact(&[0x80, v as u8])?;
+                } else if v <= u64::from(u16::max_value()) {
                     let mut buf: [_; 3] = [0x81, 0, 0];
-                    buf[1..].copy_from_slice(&v.to_be_bytes());
+                    buf[1..].copy_from_slice(&(v as u16).to_be_bytes());
                     self.writer.write_exact(&buf)?;
-                } else if let Ok(v) = u32::try_from(v) {
+                } else if v <= u64::from(u32::max_value()) {
                     let mut buf: [_; 5] = [0x83, 0, 0, 0, 0];
-                    buf[1..].copy_from_slice(&v.to_be_bytes());
+                    buf[1..].copy_from_slice(&(v as u32).to_be_bytes());
                     self.writer.write_exact(&buf)?;
                 } else {
                     let mut buf: [_; 9] = [0x87, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -587,19 +589,17 @@ fn write_plist_value_ty_and_size(
     token: u8,
     size: usize,
 ) -> Result<(), Error> {
-    if let Ok(size) = u8::try_from(size) {
-        if size < 0x0f {
-            writer.write_exact(&[token | size])?;
-        } else {
-            writer.write_exact(&[token | 0x0f, 0x10, size])?;
-        }
-    } else if let Ok(size) = u16::try_from(size) {
+    if size < 0x0f {
+        writer.write_exact(&[token | (size as u8)])?;
+    } else if size <= u8::max_value() as usize {
+        writer.write_exact(&[token | 0x0f, 0x10, size as u8])?;
+    } else if size <= u16::max_value() as usize {
         let mut buf: [_; 4] = [token | 0x0f, 0x11, 0, 0];
-        buf[2..].copy_from_slice(&size.to_be_bytes());
+        buf[2..].copy_from_slice(&(size as u16).to_be_bytes());
         writer.write_exact(&buf)?;
-    } else if let Ok(size) = u32::try_from(size) {
+    } else if size <= u32::max_value() as usize {
         let mut buf: [_; 6] = [token | 0x0f, 0x12, 0, 0, 0, 0];
-        buf[2..].copy_from_slice(&size.to_be_bytes());
+        buf[2..].copy_from_slice(&(size as u32).to_be_bytes());
         writer.write_exact(&buf)?;
     } else {
         let mut buf: [_; 10] = [token | 0x0f, 0x13, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -645,7 +645,7 @@ impl<W: Write> Write for PosWriter<W> {
         self.pos = self
             .pos
             .checked_add(count)
-            .expect("binary plist cannot be larger than `usize::MAX` bytes");
+            .expect("binary plist cannot be larger than `usize::max_value()` bytes");
         Ok(count)
     }
 
@@ -670,7 +670,7 @@ impl ObjectRef {
     }
 }
 
-impl Value<'_> {
+impl<'a> Value<'a> {
     fn into_owned(self) -> Value<'static> {
         match self {
             Value::Boolean(v) => Value::Boolean(v),

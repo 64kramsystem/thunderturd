@@ -16,7 +16,7 @@ use std::{
 use enum_map::{Enum, EnumMap};
 use enumset::{EnumSet, EnumSetType};
 use log::{Level, log_enabled};
-use neqo_common::{Buffer, Ecn, MAX_VARINT, qdebug, qtrace, qwarn, to_u64};
+use neqo_common::{Buffer, Ecn, MAX_VARINT, qdebug, qtrace, qwarn};
 use nss::Epoch;
 use smallvec::SmallVec;
 use strum::{Display, EnumIter};
@@ -468,7 +468,9 @@ impl RecvdPackets {
         // We use the default exponent, so delay is in multiples of 8 microseconds.
         let ack_delay = u64::try_from(elapsed.as_micros() / 8).unwrap_or(u64::MAX);
         let ack_delay = min(MAX_VARINT, ack_delay);
-        let extra_ranges = to_u64(ranges.len() - 1);
+        let Ok(extra_ranges) = u64::try_from(ranges.len() - 1) else {
+            return;
+        };
 
         builder.encode_frame(
             if self.ecn_count.is_some() {
@@ -624,7 +626,7 @@ impl Default for AckTracker {
 mod tests {
     use std::collections::HashSet;
 
-    use neqo_common::{Decoder, Encoder, to_u64};
+    use neqo_common::{Decoder, Encoder};
     use test_fixture::now;
 
     use super::{
@@ -704,7 +706,7 @@ mod tests {
 
         // This will add one too many disjoint ranges.
         for i in 0..=MAX_TRACKED_RANGES {
-            rp.set_received(now(), to_u64(i * 2), true, &mut stats)
+            rp.set_received(now(), (i * 2) as u64, true, &mut stats)
                 .unwrap();
         }
 
@@ -1203,7 +1205,7 @@ mod tests {
         let mut stats = Stats::default();
         // Fill with MAX_TRACKED_RANGES + 2 disjoint ack-eliciting packets.
         for i in 0..=(MAX_TRACKED_RANGES + 1) {
-            rp.set_received(now(), to_u64(i * 2), true, &mut stats)
+            rp.set_received(now(), (i * 2) as u64, true, &mut stats)
                 .unwrap();
         }
         // Two ranges should have been dropped.

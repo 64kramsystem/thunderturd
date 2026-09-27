@@ -284,7 +284,7 @@ impl<W: fmt::Write> super::Writer<'_, W> {
             }
             writeln!(
                 self.out,
-                "{level}((uint64_t){grid_size}.x) * ((uint64_t){grid_size}.y) > {max_total} ||"
+                "{level}((uint64_t){grid_size}.x) * ((uint64_t){grid_size}.y) > 0xffffffffull ||"
             )?;
             writeln!(
                     self.out,

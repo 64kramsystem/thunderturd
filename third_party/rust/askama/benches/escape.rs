@@ -1,7 +1,5 @@
-use std::hint::black_box;
-
 use askama::filters::{Html, escape};
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 criterion_main!(benches);
 criterion_group!(benches, functions);

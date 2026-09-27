@@ -26,8 +26,8 @@
 /// TODO(<https://github.com/gfx-rs/wgpu/issues/5572>): Resolve invalid
 /// acquisitions of DEVICE_COMMAND_INDICES followed by COMMAND_BUFFER_DATA.
 ///
-/// [`Mutex`]: wgpu_sync::Mutex
-/// [`RwLock`]: wgpu_sync::RwLock
+/// [`Mutex`]: parking_lot::Mutex
+/// [`RwLock`]: parking_lot::RwLock
 /// [`SnatchLock`]: crate::snatch::SnatchLock
 /// [`CommandBuffer::data`]: crate::command::CommandBuffer::data
 #[derive(Debug, Copy, Clone)]
@@ -113,7 +113,7 @@ define_lock_ranks! {
         BUFFER_POOL,
         DEVICE_TRACE,
         DEVICE_USAGE_SCOPES,
-        INSTANCE_DEVICES,
+        REGISTRY_STORAGE,
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
     }
     rank DEVICE_SNATCHABLE_LOCK "Device::snatchable_lock" followed by {
@@ -128,7 +128,7 @@ define_lock_ranks! {
         BUFFER_POOL,
         DEVICE_TRACE,
         DEVICE_USAGE_SCOPES,
-        INSTANCE_DEVICES,
+        REGISTRY_STORAGE,
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
         TEXTURE_BIND_GROUPS,
         TEXTURE_CLEAR_MODE,
@@ -169,14 +169,11 @@ define_lock_ranks! {
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
     }
     rank BUFFER_MAP_STATE "Buffer::map_state" followed by {
-        BUFFER_INITIALIZATION_STATUS,
         DEVICE_TRACE,
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
     }
     rank COMMAND_ALLOCATOR_FREE_ENCODERS "CommandAllocator::free_encoders" followed by {
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
-    }
-    rank INSTANCE_DEVICES "InstanceDevices" followed by {
     }
 
     // Leaf ranks reachable from the graph above, alphabetical.
@@ -187,6 +184,7 @@ define_lock_ranks! {
     rank DEVICE_DEFERRED_DESTROY "Device::deferred_destroy" followed by { }
     rank DEVICE_TRACE "Device::trace" followed by { }
     rank DEVICE_USAGE_SCOPES "Device::usage_scopes" followed by { }
+    rank REGISTRY_STORAGE "Registry::storage" followed by { }
     rank SHARED_TRACKER_INDEX_ALLOCATOR_INNER "SharedTrackerIndexAllocator::inner" followed by { }
     rank QUERY_SET_INITIALIZED_SLOTS "QuerySet::initialized_slots" followed by { }
     rank TEXTURE_BIND_GROUPS "Texture::bind_groups" followed by { }
@@ -196,6 +194,7 @@ define_lock_ranks! {
     // Ranks not connected to the graph, alphabetical.
     rank BLAS_BUILT_INDEX "Blas::built_index" followed by { }
     rank DEVICE_LOST_CLOSURE "Device::device_lost_closure" followed by { }
+    rank IDENTITY_MANAGER_VALUES "IdentityManager::values" followed by { }
     rank RESOURCE_POOL_INNER "ResourcePool::inner" followed by { }
     rank SURFACE_PRESENTATION "Surface::presentation" followed by { }
     rank TLAS_BUILT_INDEX "Tlas::built_index" followed by { }

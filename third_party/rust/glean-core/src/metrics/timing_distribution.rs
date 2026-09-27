@@ -10,11 +10,12 @@ use std::time::Duration;
 
 use malloc_size_of_derive::MallocSizeOf;
 
-use crate::common_metric_data::{CommonMetricDataInternal, MetricLabel};
+use crate::common_metric_data::{CommonMetricDataInternal, DynamicLabelType};
 use crate::error_recording::{record_error, test_get_num_recorded_errors, ErrorType};
 use crate::histogram::{Functional, Histogram};
 use crate::metrics::time_unit::TimeUnit;
 use crate::metrics::{DistributionData, Metric, MetricType};
+use crate::storage::StorageManager;
 use crate::Glean;
 use crate::{CommonMetricData, TestGetValue};
 
@@ -110,9 +111,9 @@ impl MetricType for TimingDistributionMetric {
         }
     }
 
-    fn with_label(&self, label: MetricLabel) -> Self {
+    fn with_dynamic_label(&self, label: DynamicLabelType) -> Self {
         let mut meta = (*self.meta).clone();
-        meta.inner.label = Some(label);
+        meta.inner.dynamic_label = Some(label);
         Self {
             meta: Arc::new(meta),
             time_unit: self.time_unit,
@@ -541,11 +542,11 @@ impl TimingDistributionMetric {
             .into()
             .unwrap_or_else(|| &self.meta().inner.send_in_pings[0]);
 
-        match glean.storage().get_metric(
-            #[cfg(not(feature = "sqlite"))]
-            glean,
-            self.meta(),
+        match StorageManager.snapshot_metric(
+            glean.storage(),
             queried_ping_name,
+            &self.meta.identifier(glean),
+            self.meta.inner.lifetime,
         ) {
             Some(Metric::TimingDistribution(hist)) => Some(snapshot(&hist)),
             _ => None,

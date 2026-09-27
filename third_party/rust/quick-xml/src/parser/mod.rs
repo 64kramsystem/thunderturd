@@ -2,13 +2,9 @@
 
 use crate::errors::SyntaxError;
 
-mod comment;
-mod dtd;
 mod element;
 mod pi;
 
-pub use comment::CommentParser;
-pub(crate) use dtd::DtdParser;
 pub use element::ElementParser;
 pub use pi::PiParser;
 
@@ -29,9 +25,5 @@ pub trait Parser {
 
     /// Returns parse error produced by this parser in case of reaching end of
     /// input without finding the end of a parsed thing.
-    ///
-    /// # Parameters
-    /// - `content`: the content that was read before EOF. Some parsers may use
-    ///   this to provide more specific error messages.
-    fn eof_error(self, content: &[u8]) -> SyntaxError;
+    fn eof_error() -> SyntaxError;
 }

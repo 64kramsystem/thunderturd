@@ -16,7 +16,7 @@ use std::{
 };
 
 use enum_map::EnumMap;
-use neqo_common::{Buffer, Length, MAX_VARINT, Role, const_min_u64, qdebug, qtrace, to_u64};
+use neqo_common::{Buffer, MAX_VARINT, Role, qdebug, qtrace};
 
 use crate::{
     Error, Res,
@@ -107,16 +107,15 @@ where
     }
 
     /// Consume flow control.
-    pub fn consume<L: Length>(&mut self, count: L) {
-        let amt = count.as_u64();
+    pub fn consume(&mut self, count: usize) {
+        let amt = u64::try_from(count).expect("usize fits into u64");
         debug_assert!(self.used + amt <= self.limit);
         self.used += amt;
     }
 
     /// Get available flow control.
-    #[expect(clippy::cast_possible_truncation, reason = "value is capped")]
-    pub const fn available(&self) -> usize {
-        const_min_u64(self.limit - self.used, to_u64(usize::MAX)) as usize
+    pub fn available(&self) -> usize {
+        usize::try_from(self.limit - self.used).unwrap_or(usize::MAX)
     }
 
     /// How much data has been written.
@@ -143,11 +142,6 @@ where
     fn blocked_needed(&self) -> Option<u64> {
         self.blocked_at
             .filter(|&l| self.blocked_frame && self.limit <= l)
-    }
-
-    /// Returns whether a blocking frame needs to be sent.
-    pub(crate) fn is_blocked(&self) -> bool {
-        self.blocked_needed().is_some()
     }
 
     /// Clear the need to send a blocked frame.
@@ -718,7 +712,7 @@ impl LocalStreamLimits {
         let fc = &mut self.limits[stream_type];
         if fc.available() > 0 {
             let new_stream = fc.used();
-            fc.consume(1_u64);
+            fc.consume(1);
             Some(StreamId::from(
                 (new_stream << 2) + stream_type as u64 + self.role_bit,
             ))
@@ -758,7 +752,7 @@ mod test {
         time::{Duration, Instant},
     };
 
-    use neqo_common::{Encoder, Role, qdebug, to_u64};
+    use neqo_common::{Encoder, Role, qdebug};
     use nss::random;
 
     use super::{
@@ -791,13 +785,13 @@ mod test {
     #[test]
     fn update_consume() {
         let mut fc = SenderFlowControl::new((), 10);
-        fc.consume(10_u64);
+        fc.consume(10);
         assert_eq!(fc.available(), 0);
         fc.update(5); // An update lower than the current limit does nothing.
         assert_eq!(fc.available(), 0);
         fc.update(15);
         assert_eq!(fc.available(), 5);
-        fc.consume(3_u64);
+        fc.consume(3);
         assert_eq!(fc.available(), 2);
     }
 
@@ -1146,9 +1140,9 @@ mod test {
         let rtt = Duration::from_millis(40);
         let now = test_fixture::now();
         let mut fc =
-            ReceiverFlowControl::new(StreamId::new(0), to_u64(INITIAL_LOCAL_MAX_STREAM_DATA));
+            ReceiverFlowControl::new(StreamId::new(0), INITIAL_LOCAL_MAX_STREAM_DATA as u64);
 
-        let fraction = to_u64(INITIAL_LOCAL_MAX_STREAM_DATA) / WINDOW_UPDATE_FRACTION;
+        let fraction = INITIAL_LOCAL_MAX_STREAM_DATA as u64 / WINDOW_UPDATE_FRACTION;
 
         let consumed = fc.set_consumed(fraction)?;
         fc.add_retired(consumed);
@@ -1168,7 +1162,7 @@ mod test {
         let rtt = Duration::from_millis(40);
         let mut now = test_fixture::now();
         let mut fc =
-            ReceiverFlowControl::new(StreamId::new(0), to_u64(INITIAL_LOCAL_MAX_STREAM_DATA));
+            ReceiverFlowControl::new(StreamId::new(0), INITIAL_LOCAL_MAX_STREAM_DATA as u64);
         let initial_max_active = fc.max_active();
 
         // Consume and retire multiple receive windows without increasing time.
@@ -1204,7 +1198,7 @@ mod test {
         let rtt = Duration::from_millis(40);
         let now = test_fixture::now();
         let mut fc =
-            ReceiverFlowControl::new(StreamId::new(0), to_u64(INITIAL_LOCAL_MAX_STREAM_DATA));
+            ReceiverFlowControl::new(StreamId::new(0), INITIAL_LOCAL_MAX_STREAM_DATA as u64);
 
         // Send first window update to give auto-tuning algorithm a baseline.
         let consumed = fc.set_consumed(fc.next_limit())?;
@@ -1271,12 +1265,12 @@ mod test {
             let mut send_to_recv = VecDeque::new();
             let mut recv_to_send = VecDeque::new();
 
-            let mut last_max_active = to_u64(INITIAL_LOCAL_MAX_STREAM_DATA);
+            let mut last_max_active = INITIAL_LOCAL_MAX_STREAM_DATA as u64;
             let mut last_max_active_changed = now;
 
-            let mut sender_window = to_u64(INITIAL_LOCAL_MAX_STREAM_DATA);
+            let mut sender_window = INITIAL_LOCAL_MAX_STREAM_DATA as u64;
             let mut fc =
-                ReceiverFlowControl::new(StreamId::new(0), to_u64(INITIAL_LOCAL_MAX_STREAM_DATA));
+                ReceiverFlowControl::new(StreamId::new(0), INITIAL_LOCAL_MAX_STREAM_DATA as u64);
 
             let mut bytes_received: u64 = 0;
             let start_time = now;
@@ -1367,7 +1361,7 @@ mod test {
 
             assert!(
                 effective_window - TOLERANCE <= bdp
-                    || fc.max_active == to_u64(INITIAL_LOCAL_MAX_STREAM_DATA),
+                    || fc.max_active == INITIAL_LOCAL_MAX_STREAM_DATA as u64,
                 "{summary} Receive window is larger than the bdp."
             );
 
@@ -1392,7 +1386,7 @@ mod test {
     fn connection_flow_control_auto_tune() -> Res<()> {
         let rtt = Duration::from_millis(40);
         let now = test_fixture::now();
-        let initial_window = to_u64(INITIAL_LOCAL_MAX_STREAM_DATA * 16);
+        let initial_window = (INITIAL_LOCAL_MAX_STREAM_DATA * 16) as u64;
         let mut fc = ReceiverFlowControl::new((), initial_window);
         let initial_max_active = fc.max_active();
 
@@ -1433,7 +1427,7 @@ mod test {
     fn connection_flow_control_respects_max_window() -> Res<()> {
         let rtt = Duration::from_millis(40);
         let now = test_fixture::now();
-        let initial_window = to_u64(INITIAL_LOCAL_MAX_STREAM_DATA * 16);
+        let initial_window = (INITIAL_LOCAL_MAX_STREAM_DATA * 16) as u64;
         let mut fc = ReceiverFlowControl::new((), initial_window);
 
         // Helper to write frames

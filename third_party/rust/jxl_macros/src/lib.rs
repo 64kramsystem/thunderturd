@@ -6,51 +6,43 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
+use proc_macro_error2::{abort, proc_macro_error};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{DeriveInput, Meta, parse_macro_input};
 
-macro_rules! bail {
-    ($span:expr, $($tt:tt)*) => {
-        return Err(syn::Error::new_spanned($span, format!($($tt)*)))
-    };
-}
-
-fn get_bits(expr_call: &syn::ExprCall) -> syn::Result<syn::Expr> {
+fn get_bits(expr_call: &syn::ExprCall) -> syn::Expr {
     if let syn::Expr::Path(ep) = &*expr_call.func {
         if !ep.path.is_ident("Bits") {
-            bail!(
+            abort!(
                 expr_call,
                 "Unexpected function name in coder: {}",
                 ep.path.get_ident().unwrap()
             );
         }
         if expr_call.args.len() != 1 {
-            bail!(
+            abort!(
                 expr_call,
                 "Unexpected number of arguments for Bits() in coder: {}",
                 expr_call.args.len()
             );
         }
-        return Ok(expr_call.args[0].clone());
+        return expr_call.args[0].clone();
     }
-    bail!(expr_call, "Unexpected function call in coder");
+    abort!(expr_call, "Unexpected function call in coder");
 }
 
-fn parse_single_coder(
-    input: &syn::Expr,
-    extra_lit: Option<&syn::ExprLit>,
-) -> syn::Result<TokenStream2> {
+fn parse_single_coder(input: &syn::Expr, extra_lit: Option<&syn::ExprLit>) -> TokenStream2 {
     match &input {
         syn::Expr::Lit(lit) => match extra_lit {
-            None => Ok(quote! {U32::Val(#lit)}),
-            Some(elit) => Ok(quote! {U32::Val(#lit + #elit)}),
+            None => quote! {U32::Val(#lit)},
+            Some(elit) => quote! {U32::Val(#lit + #elit)},
         },
         syn::Expr::Call(expr_call) => {
-            let bits = get_bits(expr_call)?;
+            let bits = get_bits(expr_call);
             match extra_lit {
-                None => Ok(quote! {U32::Bits(#bits)}),
-                Some(elit) => Ok(quote! {U32::BitsOffset{n: #bits, off: #elit}}),
+                None => quote! {U32::Bits(#bits)},
+                Some(elit) => quote! {U32::BitsOffset{n: #bits, off: #elit}},
             }
         }
         syn::Expr::Binary(syn::ExprBinary {
@@ -66,50 +58,49 @@ fn parse_single_coder(
             };
             match (&**left, &**right) {
                 (syn::Expr::Call(expr_call), syn::Expr::Lit(lit)) => {
-                    let bits = get_bits(expr_call)?;
+                    let bits = get_bits(expr_call);
                     match extra_lit {
-                        None => Ok(quote! {U32::BitsOffset{n: #bits, off: #lit}}),
-                        Some(elit) => Ok(quote! {U32::BitsOffset{n: #bits, off: #lit + #elit}}),
+                        None => quote! {U32::BitsOffset{n: #bits, off: #lit}},
+                        Some(elit) => quote! {U32::BitsOffset{n: #bits, off: #lit + #elit}},
                     }
                 }
-                _ => bail!(
+                _ => abort!(
                     input,
-                    "Unexpected expression in coder, must be Bits(a) + b, Bits(a), or b",
+                    "Unexpected expression in coder, must be Bits(a) + b, Bits(a), or b"
                 ),
             }
         }
-        _ => bail!(
+        _ => abort!(
             input,
-            "Unexpected expression in coder, must be Bits(a) + b, Bits(a), or b",
+            "Unexpected expression in coder, must be Bits(a) + b, Bits(a), or b"
         ),
     }
 }
 
-fn parse_coder(input: &syn::Expr) -> syn::Result<TokenStream2> {
-    let parse_u2s =
-        |expr_call: &syn::ExprCall, lit: Option<&syn::ExprLit>| -> syn::Result<TokenStream2> {
-            if let syn::Expr::Path(ep) = &*expr_call.func {
-                if !ep.path.is_ident("u2S") {
-                    let coder = parse_single_coder(input, None)?;
-                    return Ok(quote! {U32Coder::Direct(#coder)});
-                }
-                if expr_call.args.len() != 4 {
-                    bail!(
-                        input,
-                        "Unexpected number of arguments for U32() in coder: {}",
-                        expr_call.args.len()
-                    );
-                }
-                let args = vec![
-                    parse_single_coder(&expr_call.args[0], lit)?,
-                    parse_single_coder(&expr_call.args[1], lit)?,
-                    parse_single_coder(&expr_call.args[2], lit)?,
-                    parse_single_coder(&expr_call.args[3], lit)?,
-                ];
-                return Ok(quote! {U32Coder::Select(#(#args),*)});
+fn parse_coder(input: &syn::Expr) -> TokenStream2 {
+    let parse_u2s = |expr_call: &syn::ExprCall, lit: Option<&syn::ExprLit>| {
+        if let syn::Expr::Path(ep) = &*expr_call.func {
+            if !ep.path.is_ident("u2S") {
+                let coder = parse_single_coder(input, None);
+                return quote! {U32Coder::Direct(#coder)};
             }
-            bail!(input, "Unexpected function call in coder");
-        };
+            if expr_call.args.len() != 4 {
+                abort!(
+                    input,
+                    "Unexpected number of arguments for U32() in coder: {}",
+                    expr_call.args.len()
+                );
+            }
+            let args = vec![
+                parse_single_coder(&expr_call.args[0], lit),
+                parse_single_coder(&expr_call.args[1], lit),
+                parse_single_coder(&expr_call.args[2], lit),
+                parse_single_coder(&expr_call.args[3], lit),
+            ];
+            return quote! {U32Coder::Select(#(#args),*)};
+        }
+        abort!(input, "Unexpected function call in coder");
+    };
 
     match &input {
         syn::Expr::Call(expr_call) => parse_u2s(expr_call, None),
@@ -128,9 +119,9 @@ fn parse_coder(input: &syn::Expr) -> syn::Result<TokenStream2> {
                 (syn::Expr::Call(expr_call), syn::Expr::Lit(lit)) => {
                     parse_u2s(expr_call, Some(lit))
                 }
-                _ => bail!(
+                _ => abort!(
                     input,
-                    "Unexpected expression in coder, must be (u2S|Bits)(a) + b, (u2S|Bits)(a), or b",
+                    "Unexpected expression in coder, must be (u2S|Bits)(a) + b, (u2S|Bits)(a), or b"
                 ),
             }
         }
@@ -138,7 +129,7 @@ fn parse_coder(input: &syn::Expr) -> syn::Result<TokenStream2> {
     }
 }
 
-fn parse_size_coder(mut input: syn::Expr) -> syn::Result<TokenStream2> {
+fn parse_size_coder(mut input: syn::Expr) -> TokenStream2 {
     match input {
         syn::Expr::Call(syn::ExprCall {
             ref func,
@@ -146,7 +137,7 @@ fn parse_size_coder(mut input: syn::Expr) -> syn::Result<TokenStream2> {
             ..
         }) => {
             if args.len() != 1 {
-                bail!(&input, "Expected 1 argument in sized_coder inner call",);
+                abort!(input, "Expected 1 argument in sized_coder inner call");
             }
 
             match &**func {
@@ -155,17 +146,17 @@ fn parse_size_coder(mut input: syn::Expr) -> syn::Result<TokenStream2> {
                     parse_coder(&arg)
                 }
                 syn::Expr::Path(expr_path) if expr_path.path.is_ident("explicit") => {
-                    Ok(quote! { U32Coder::Direct(U32::Val(#args)) })
+                    quote! { U32Coder::Direct(U32::Val(#args)) }
                 }
-                _ => bail!(
-                    &input,
-                    "Unexpected expression in size_coder, must be 'implicit()' or 'explicit()'",
+                _ => abort!(
+                    input,
+                    "Unexpected expression in size_coder, must be 'implicit()' or 'explicit()'"
                 ),
             }
         }
-        _ => bail!(
-            &input,
-            "Unexpected expression in size_coder, must be 'implicit()' or 'explicit()'",
+        _ => abort!(
+            input,
+            "Unexpected expression in size_coder, must be 'implicit()' or 'explicit()'"
         ),
     }
 }
@@ -274,11 +265,7 @@ struct Field {
 }
 
 impl Field {
-    fn parse(
-        f: &syn::Field,
-        num: usize,
-        all_default_field: &mut Option<syn::Ident>,
-    ) -> syn::Result<Field> {
+    fn parse(f: &syn::Field, num: usize, all_default_field: &mut Option<syn::Ident>) -> Field {
         let mut condition = None;
         let mut default = None;
         let mut coder = None;
@@ -300,32 +287,32 @@ impl Field {
             match a.path().get_ident().map(syn::Ident::to_string).as_deref() {
                 Some("coder") => {
                     if coder.is_some() {
-                        bail!(f, "Repeated coder");
+                        abort!(f, "Repeated coder");
                     }
-                    let coder_ast = a.parse_args::<syn::Expr>()?;
+                    let coder_ast = a.parse_args::<syn::Expr>().unwrap();
                     coder = Some(Coder::U32(U32 {
-                        coder: parse_coder(&coder_ast)?,
+                        coder: parse_coder(&coder_ast),
                     }));
                 }
                 Some("default") => {
                     if default.is_some() {
-                        bail!(f, "Repeated default");
+                        abort!(f, "Repeated default");
                     }
-                    let default_expr = a.parse_args::<syn::Expr>()?;
+                    let default_expr = a.parse_args::<syn::Expr>().unwrap();
                     default = Some(quote! {#default_expr});
                 }
                 Some("default_element") => {
                     if default_element.is_some() {
-                        bail!(f, "Repeated default_element");
+                        abort!(f, "Repeated default_element")
                     }
-                    let default_element_expr = a.parse_args::<syn::Expr>()?;
+                    let default_element_expr = a.parse_args::<syn::Expr>().unwrap();
                     default_element = Some(quote! { #default_element_expr })
                 }
                 Some("condition") => {
                     if condition.is_some() {
-                        bail!(f, "Repeated condition");
+                        abort!(f, "Repeated condition");
                     }
-                    let condition_ast = a.parse_args::<syn::Expr>()?;
+                    let condition_ast = a.parse_args::<syn::Expr>().unwrap();
                     let pretty_cond = prettify_condition(&condition_ast);
                     condition = Some(Condition {
                         expr: Some(condition_ast),
@@ -335,19 +322,19 @@ impl Field {
                 }
                 Some("all_default") => {
                     if num != 0 {
-                        bail!(f, "all_default is not the first field");
+                        abort!(f, "all_default is not the first field");
                     }
                     if default.is_some() {
-                        bail!(f, "all_default has an implicit default");
+                        abort!(f, "all_default has an implicit default");
                     }
                     is_all_default = true;
                     default = Some(quote! { true });
                 }
                 Some("select_coder") => {
                     if select_coder.is_some() {
-                        bail!(f, "Repeated select_coder");
+                        abort!(f, "Repeated select_coder");
                     }
-                    let condition_ast = a.parse_args::<syn::Expr>()?;
+                    let condition_ast = a.parse_args::<syn::Expr>().unwrap();
                     let pretty_cond = prettify_condition(&condition_ast);
                     select_coder = Some(Condition {
                         expr: Some(condition_ast),
@@ -357,34 +344,34 @@ impl Field {
                 }
                 Some("coder_false") => {
                     if coder_false.is_some() {
-                        bail!(f, "Repeated coder_false");
+                        abort!(f, "Repeated coder_false");
                     }
-                    let coder_ast = a.parse_args::<syn::Expr>()?;
+                    let coder_ast = a.parse_args::<syn::Expr>().unwrap();
                     coder_false = Some(U32 {
-                        coder: parse_coder(&coder_ast)?,
+                        coder: parse_coder(&coder_ast),
                     });
                 }
                 Some("coder_true") => {
                     if coder_true.is_some() {
-                        bail!(f, "Repeated coder_true");
+                        abort!(f, "Repeated coder_true");
                     }
-                    let coder_ast = a.parse_args::<syn::Expr>()?;
+                    let coder_ast = a.parse_args::<syn::Expr>().unwrap();
                     coder_true = Some(U32 {
-                        coder: parse_coder(&coder_ast)?,
+                        coder: parse_coder(&coder_ast),
                     });
                 }
                 Some("size_coder") => {
                     if size_coder.is_some() {
-                        bail!(f, "Repeated size_coder");
+                        abort!(f, "Repeated size_coder");
                     }
-                    let coder_ast = a.parse_args::<syn::Expr>()?;
+                    let coder_ast = a.parse_args::<syn::Expr>().unwrap();
                     size_coder = Some(U32 {
-                        coder: parse_size_coder(coder_ast)?,
+                        coder: parse_size_coder(coder_ast),
                     });
                 }
                 Some("nonserialized") => {
                     let Meta::List(ns) = &a.meta else {
-                        bail!(a, "Invalid attribute");
+                        abort!(a, "Invalid attribute");
                     };
                     let stream = &ns.tokens;
                     nonserialized.push(quote! {#stream});
@@ -394,18 +381,18 @@ impl Field {
         }
 
         if default.is_some() && default_element.is_some() {
-            bail!(f, "default is incompatible with default_element");
+            abort!(f, "default is incompatible with default_element");
         }
 
         if let Some(select_coder) = select_coder {
             if coder_true.is_none() || coder_false.is_none() {
-                bail!(
+                abort!(
                     f,
-                    "Invalid field, select_coder is set but coder_true or coder_false are not",
-                );
+                    "Invalid field, select_coder is set but coder_true or coder_false are not"
+                )
             }
             if coder.is_some() {
-                bail!(f, "Invalid field, select_coder and coder are both present");
+                abort!(f, "Invalid field, select_coder and coder are both present")
             }
             coder = Some(Coder::Select(
                 select_coder,
@@ -445,14 +432,14 @@ impl Field {
         if is_all_default {
             *all_default_field = Some(f.ident.as_ref().unwrap().clone());
         }
-        Ok(Field {
+        Field {
             name: ident.clone(),
             kind,
             ty: f.ty.clone(),
             default,
             default_element,
             nonserialized_inits: nonserialized,
-        })
+        }
     }
 
     // Produces reading code (possibly with tracing).
@@ -551,19 +538,23 @@ impl Field {
     }
 }
 
-fn derive_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
+fn derive_struct(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
 
     let validate = input.attrs.iter().any(|a| a.path().is_ident("validate"));
-    let mut nonserialized = Vec::new();
-    for a in &input.attrs {
-        if a.path().is_ident("nonserialized") {
-            let expr = a.parse_args::<syn::Expr>()?;
-            nonserialized.push(expr);
-        }
-    }
+    let nonserialized: Vec<_> = input
+        .attrs
+        .iter()
+        .filter_map(|a| {
+            if a.path().is_ident("nonserialized") {
+                Some(a.parse_args::<syn::Expr>().unwrap())
+            } else {
+                None
+            }
+        })
+        .collect();
     if nonserialized.len() > 1 {
-        bail!(input, "repeated nonserialized");
+        abort!(input, "repeated nonserialized");
     }
     let nonserialized = if nonserialized.is_empty() {
         quote! {Empty}
@@ -575,7 +566,7 @@ fn derive_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let data = if let syn::Data::Struct(struct_data) = &input.data {
         struct_data
     } else {
-        bail!(input, "derive_struct didn't get a struct");
+        abort!(input, "derive_struct didn't get a struct");
     };
 
     let fields = if let syn::Fields::Named(syn::FieldsNamed {
@@ -585,7 +576,7 @@ fn derive_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
     {
         named
     } else {
-        bail!(&data.fields, "only named fields are supported (for now?)",);
+        abort!(data.fields, "only named fields are supported (for now?)");
     };
 
     let mut all_default_field = None;
@@ -594,7 +585,7 @@ fn derive_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         .iter()
         .enumerate()
         .map(|(n, f)| Field::parse(f, n, &mut all_default_field))
-        .collect::<syn::Result<Vec<_>>>()?;
+        .collect();
     let fields_read = fields.iter().map(|x| x.read_fun(&all_default_field));
     let fields_names = fields.iter().map(|x| &x.name);
 
@@ -630,7 +621,7 @@ fn derive_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         false => quote! {},
     };
 
-    Ok(quote! {
+    quote! {
         #impl_default
         impl crate::headers::encodings::UnconditionalCoder<()> for #name {
             type Nonserialized = #nonserialized;
@@ -650,12 +641,12 @@ fn derive_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 Ok(return_value)
             }
         }
-    })
+    }
 }
 
-fn derive_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
+fn derive_enum(input: &DeriveInput) -> TokenStream2 {
     let name = &input.ident;
-    Ok(quote! {
+    quote! {
         impl crate::headers::encodings::UnconditionalCoder<U32Coder> for #name {
             type Nonserialized = Empty;
             fn read_unconditional(config: &U32Coder, br: &mut BitReader, _: &Empty) -> Result<#name, Error> {
@@ -678,9 +669,10 @@ fn derive_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         U32::BitsOffset{n: 6, off: 18}), br, nonserialized)
             }
         }
-    })
+    }
 }
 
+#[proc_macro_error]
 #[proc_macro_derive(
     UnconditionalCoder,
     attributes(
@@ -701,20 +693,64 @@ fn derive_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
 pub fn derive_jxl_headers(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
-    derive_jxl_headers_inner(&input)
-        .unwrap_or_else(|err| err.to_compile_error())
-        .into()
-}
-
-fn derive_jxl_headers_inner(input: &DeriveInput) -> syn::Result<TokenStream2> {
     match &input.data {
-        syn::Data::Struct(_) => derive_struct(input),
-        syn::Data::Enum(_) => derive_enum(input),
-        _ => bail!(input, "Only implemented for struct"),
+        syn::Data::Struct(_) => derive_struct(&input).into(),
+        syn::Data::Enum(_) => derive_enum(&input).into(),
+        _ => abort!(input, "Only implemented for struct"),
     }
 }
 
 #[proc_macro_attribute]
 pub fn noop(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
+}
+
+#[cfg(feature = "test")]
+#[proc_macro]
+pub fn for_each_test_file(input: TokenStream) -> TokenStream {
+    use std::{fs, path::Path};
+    use syn::Ident;
+
+    let fn_name = parse_macro_input!(input as Ident);
+    let root_test_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("jxl")
+        .join("resources")
+        .join("test");
+    let conformance_test_dir = root_test_dir.join("conformance_test_images");
+
+    let mut tests = vec![];
+
+    for test_dir in [root_test_dir, conformance_test_dir] {
+        for entry in fs::read_dir(&test_dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "jxl") {
+                let pathname = path.to_string_lossy();
+                let relative_path = path
+                    .strip_prefix(&test_dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('/', "_slash_");
+                let test_name = format!(
+                    "{}_{}",
+                    fn_name,
+                    relative_path.strip_suffix(".jxl").unwrap()
+                )
+                .replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
+                let test_name = Ident::new(&test_name, fn_name.span());
+                tests.push(quote! {
+                    #[test]
+                    fn #test_name() {
+                        #fn_name(&Path::new(#pathname)).unwrap()
+                    }
+                });
+            }
+        }
+    }
+
+    quote! {
+        #(#tests)*
+    }
+    .into()
 }

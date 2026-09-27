@@ -3,14 +3,16 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use std::f64::consts::{FRAC_1_SQRT_2, PI, SQRT_2};
-
+use super::*;
 use jxl_simd::{test_all_instruction_sets, ScalarDescriptor, SimdDescriptor};
-use rand::{Rng, SeedableRng};
+use rand::Rng;
+use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
 use test_log::test;
 
-use super::*;
+use std::f64::consts::FRAC_1_SQRT_2;
+use std::f64::consts::PI;
+use std::f64::consts::SQRT_2;
 
 #[inline(always)]
 fn alpha(u: usize) -> f64 {

@@ -232,7 +232,7 @@ impl Connection {
     ///
     /// If there are no incoming events, ConnectionItems::Nothing will be returned.
     /// See ConnectionItems::new if you want to customize this behaviour.
-    pub fn iter(&self, timeout_ms: i32) -> ConnectionItems<'_> {
+    pub fn iter(&self, timeout_ms: i32) -> ConnectionItems {
         ConnectionItems::new(self, Some(timeout_ms), false)
     }
 
@@ -309,7 +309,6 @@ impl Connection {
     /// Add a match rule to match messages on the message bus.
     ///
     /// See the `unity_focused_window` example for how to use this to catch signals.
-    /// You can use MatchRule to construct the "rule" string.
     /// (The syntax of the "rule" string is specified in the [D-Bus specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-bus-routing-match-rules).)
     pub fn add_match(&self, rule: &str) -> Result<(), Error> {
         let mut e = Error::empty();
@@ -338,7 +337,7 @@ impl Connection {
     /// The returned iterator will return pending items only, never block for new events.
     ///
     /// See the `Watch` struct for an example.
-    pub fn watch_handle(&self, fd: WatchFd, flags: c_uint) -> ConnectionItems<'_> {
+    pub fn watch_handle(&self, fd: WatchFd, flags: c_uint) -> ConnectionItems {
         self.i.watches.as_ref().unwrap().watch_handle(fd, flags);
         ConnectionItems::new(self, None, true)
     }

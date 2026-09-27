@@ -11,9 +11,15 @@
 
 [package]
 edition = "2021"
-rust-version = "1.71.0"
+rust-version = "1.70.0"
 name = "bindgen"
-version = "0.73.1"
+version = "0.72.0"
+authors = [
+    "Jyun-Yan You <jyyou.tw@gmail.com>",
+    "Emilio Cobos Álvarez <emilio@crisal.io>",
+    "Nick Fitzgerald <fitzgen@gmail.com>",
+    "The Servo project developers",
+]
 build = "build.rs"
 autolib = false
 autobins = false
@@ -23,7 +29,7 @@ autobenches = false
 description = "Automatically generates Rust FFI bindings to C and C++ libraries."
 homepage = "https://rust-lang.github.io/rust-bindgen/"
 documentation = "https://docs.rs/bindgen"
-readme = "README.md"
+readme = "../README.md"
 keywords = [
     "bindings",
     "ffi",
@@ -66,15 +72,13 @@ __cli = [
 ]
 __testing_only_extra_assertions = []
 __testing_only_libclang_16 = []
-__testing_only_libclang_20 = []
-__testing_only_libclang_22 = []
+__testing_only_libclang_9 = []
 default = [
     "logging",
     "prettyplease",
     "runtime",
 ]
 experimental = ["dep:annotate-snippets"]
-libcpp = ["clang-sys/libcpp"]
 logging = ["dep:log"]
 runtime = ["clang-sys/runtime"]
 static = ["clang-sys/static"]
@@ -106,12 +110,16 @@ optional = true
 version = "4"
 optional = true
 
+[dependencies.itertools]
+version = ">=0.10,<0.15"
+default-features = false
+
 [dependencies.log]
 version = "0.4"
 optional = true
 
 [dependencies.prettyplease]
-version = ">=0.2.7, <0.4"
+version = "0.2.7"
 features = ["verbatim"]
 optional = true
 
@@ -134,10 +142,10 @@ default-features = false
 version = "2.1.0"
 
 [dependencies.shlex]
-version = "2"
+version = "1"
 
 [dependencies.syn]
-version = ">=2, <4"
+version = "2.0"
 features = [
     "full",
     "extra-traits",

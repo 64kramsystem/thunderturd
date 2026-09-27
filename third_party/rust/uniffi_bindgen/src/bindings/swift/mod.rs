@@ -30,11 +30,10 @@
 //!
 
 use crate::{
-    bindings::GenerateOptions,
-    interface::{apply_exclusions, rename},
-    BindgenLoader, BindgenPaths, Component, ComponentInterface, GlobalConfig,
+    bindings::GenerateOptions, interface::rename, BindgenLoader, BindgenPaths, Component,
+    ComponentInterface,
 };
-use anyhow::{bail, Result};
+use anyhow::Result;
 use camino::Utf8PathBuf;
 use fs_err as fs;
 use std::collections::HashMap;
@@ -65,11 +64,6 @@ pub fn generate(
     options: GenerateOptions,
 ) -> Result<Vec<Component<Config>>> {
     let metadata = loader.load_metadata(&options.source)?;
-    if let Some(crate_filter) = &options.crate_filter {
-        if !metadata.contains_key(crate_filter) {
-            bail!("No UniFFI metadata found for crate {crate_filter}");
-        }
-    }
     let cis = loader.load_cis(metadata)?;
     let mut components = loader.load_components(cis, parse_config)?;
     apply_renames(&mut components);
@@ -140,27 +134,17 @@ pub fn generate(
 /// specialized `uniffi-bindgen-[language]` commands.
 pub fn generate_swift_bindings(options: SwiftBindingsOptions) -> Result<()> {
     #[cfg(not(feature = "cargo-metadata"))]
-    let mut paths = BindgenPaths::default();
+    let paths = BindgenPaths::default();
 
     #[cfg(feature = "cargo-metadata")]
     let mut paths = BindgenPaths::default();
-
-    let global_config = if let Some(ref path) = options.config {
-        let (config, crate_roots_layer) = GlobalConfig::from_file(path)?;
-        if let Some(layer) = crate_roots_layer {
-            paths.add_layer(layer);
-        }
-        config
-    } else {
-        GlobalConfig::default()
-    };
 
     #[cfg(feature = "cargo-metadata")]
     paths.add_cargo_metadata_layer(options.metadata_no_deps)?;
 
     fs::create_dir_all(&options.out_dir)?;
 
-    let loader = BindgenLoader::new(paths, global_config);
+    let loader = BindgenLoader::new(paths);
     let metadata = loader.load_metadata(&options.source)?;
     let cis = loader.load_cis(metadata)?;
     let mut components = loader.load_components(cis, parse_config)?;
@@ -236,16 +220,10 @@ pub struct SwiftBindingsOptions {
     pub modulemap_filename: Option<String>,
     pub metadata_no_deps: bool,
     pub link_frameworks: Vec<String>,
-    pub config: Option<Utf8PathBuf>,
 }
 
 // A helper for renaming items.
 fn apply_renames(components: &mut Vec<Component<Config>>) {
-    // Remove excluded items, this happens before renaming
-    for c in components.iter_mut() {
-        apply_exclusions(&mut c.ci, &c.config.exclude);
-    }
-
     let mut module_renames = HashMap::new();
     // Collect all rename configurations from all components, keyed by module_path
     for c in components.iter() {

@@ -1,7 +1,6 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
-#![cfg(feature = "sqlite")]
 
 mod common;
 use crate::common::*;
@@ -9,7 +8,8 @@ use crate::common::*;
 use std::fs;
 use std::path::Path;
 
-use rusqlite::params;
+use rkv::Rkv;
+use rkv::StoreOptions;
 use uuid::Uuid;
 
 use glean_core::metrics::*;
@@ -23,8 +23,7 @@ fn clientid_metric() -> UuidMetric {
         send_in_pings: vec!["glean_client_info".into()],
         lifetime: Lifetime::User,
         disabled: false,
-        label: None,
-        in_session: false,
+        dynamic_label: None,
     })
 }
 
@@ -127,9 +126,16 @@ fn clientid_regen_issue_with_existing_db() {
 
     // We modify the database and ONLY clear out the client id.
     {
-        let path = temp.path().join("db").join("glean.sqlite");
-        let conn = rusqlite::Connection::open(path).unwrap();
-        _ = conn.execute("DELETE FROM telemetry WHERE id = 'client_id'", ());
+        let path = temp.path().join("db");
+        let rkv = Rkv::new::<rkv::backend::SafeMode>(&path).unwrap();
+        let user_store = rkv.open_single("user", StoreOptions::create()).unwrap();
+
+        // We know this.
+        let client_id_key = "glean_client_info#client_id";
+
+        let mut writer = rkv.write().unwrap();
+        user_store.delete(&mut writer, client_id_key).unwrap();
+        writer.commit().unwrap();
     }
 
     let (glean, temp) = new_glean(Some(temp));
@@ -195,18 +201,23 @@ fn c0ffee_in_db_gets_overwritten_by_stored_client_id() {
 
     // We modify the database and ONLY set the client id to c0ffee.
     {
-        let path = temp.path().join("db").join("glean.sqlite");
-        let conn = rusqlite::Connection::open(path).unwrap();
+        let path = temp.path().join("db");
+        let rkv = Rkv::new::<rkv::backend::SafeMode>(&path).unwrap();
+        let user_store = rkv.open_single("user", StoreOptions::create()).unwrap();
 
-        let encoded = rmp_serde::to_vec(&Metric::Uuid(String::from(
+        // We know this.
+        let client_id_key = "glean_client_info#client_id";
+
+        let mut writer = rkv.write().unwrap();
+        let encoded = bincode::serialize(&Metric::Uuid(String::from(
             "c0ffeec0-ffee-c0ff-eec0-ffeec0ffeec0",
         )))
         .unwrap();
-
-        _ = conn.execute(
-            "UPDATE telemetry SET value = ? WHERE id = 'client_id'",
-            params![encoded],
-        );
+        let known_client_id = rkv::Value::Blob(&encoded);
+        user_store
+            .put(&mut writer, client_id_key, &known_client_id)
+            .unwrap();
+        writer.commit().unwrap();
     }
 
     let (glean, temp) = new_glean(Some(temp));

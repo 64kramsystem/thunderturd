@@ -7,6 +7,7 @@
 pub mod api;
 pub mod bit_reader;
 pub mod color;
+pub mod container;
 pub mod entropy_coding;
 pub mod error;
 pub mod features;
@@ -16,9 +17,6 @@ pub mod icc;
 pub mod image;
 pub mod render;
 pub mod util;
-
-#[cfg(test)]
-mod tests;
 
 // TODO: Move these to a more appropriate location.
 const GROUP_DIM: usize = 256;

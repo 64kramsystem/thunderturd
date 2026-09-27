@@ -1,10 +1,10 @@
-[defaults.bindings.kotlin]
+[bindings.kotlin]
 package_name = "mozilla.telemetry.glean.internal"
 cdylib_name = "xul"
 
-[defaults.bindings.swift]
+[bindings.swift]
 cdylib_name = "glean_ffi"
 omit_argument_labels = true
 
-[defaults.bindings.python]
+[bindings.python]
 cdylib_name = "glean_ffi"

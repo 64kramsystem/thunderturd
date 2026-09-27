@@ -1,13 +1,12 @@
 mod dispatch;
 mod seq;
-mod unordered_seq;
 
 #[cfg(test)]
 macro_rules! assert_parse(
-    ($left: expr, $right: expr) => {
-        let res: $crate::error::ModalResult<_, $crate::error::InputError<_>> = $left;
-        snapbox::assert_data_eq!(snapbox::data::ToDebug::to_debug(&res), $right);
-    };
+  ($left: expr, $right: expr) => {
+     let res: $crate::error::ModalResult<_, $crate::error::InputError<_>> = $left;
+     snapbox::assert_data_eq!(snapbox::data::ToDebug::to_debug(&res), $right);
+  };
 );
 
 macro_rules! impl_partial_eq {
@@ -54,5 +53,5 @@ macro_rules! impl_partial_ord {
     };
 }
 
-#[cfg(all(test, feature = "ascii"))]
+#[cfg(test)]
 mod tests;

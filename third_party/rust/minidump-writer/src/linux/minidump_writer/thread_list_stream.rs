@@ -1,10 +1,4 @@
-use {
-    super::*,
-    crate::minidump_cpu::RawContextCPU,
-    error_graph::{ErrorList, WriteErrorList},
-    failspot::failspot,
-    std::cmp::min,
-};
+use {super::*, crate::minidump_cpu::RawContextCPU, std::cmp::min};
 
 // The following kLimit* constants are for when minidump_size_limit_ is set
 // and the minidump size might exceed it.
@@ -39,13 +33,9 @@ pub enum SectionThreadListError {
         std::num::TryFromIntError,
     ),
     #[error("Failed to copy memory from process")]
-    CopyFromProcessError(#[source] CopyFromProcessError),
-    #[error("Failed to locate the stack pointer's memory mapping")]
-    GetStackInfoFailed(#[source] Box<WriterError>),
+    CopyFromProcessError(#[from] CopyFromProcessError),
     #[error("Failed to get thread info")]
     ThreadInfoError(#[from] ThreadInfoError),
-    #[error("Soft errors occurred getting thread info")]
-    ThreadInfoSoftErrors(#[source] ErrorList<ThreadInfoError>),
     #[error("Failed to write to memory buffer")]
     IOError(
         #[from]
@@ -60,7 +50,6 @@ impl MinidumpWriter {
     pub fn write_thread_list_stream(
         &mut self,
         buffer: &mut DumpBuf,
-        mut soft_errors: impl WriteErrorList<SectionThreadListError>,
     ) -> Result<MDRawDirectory, SectionThreadListError> {
         let num_threads = self.threads.len();
         // Memory looks like this:
@@ -118,7 +107,6 @@ impl MinidumpWriter {
                     instruction_ptr,
                     stack_pointer,
                     MaxStackLen::None,
-                    &mut soft_errors,
                 )?;
                 // Copy 256 bytes around crashing instruction pointer to minidump.
                 let ip_memory_size: usize = 256;
@@ -126,12 +114,6 @@ impl MinidumpWriter {
                 // it's contained within. If it's not in mapped memory,
                 // don't bother trying to write it.
                 for mapping in &self.mappings {
-                    let instruction_ptr = failspot!(if CrashingThreadIpCopy {
-                        // Just use the first mapping since we'll error out anyway
-                        mapping.start_address + mapping.size / 2
-                    } else {
-                        instruction_ptr
-                    });
                     if instruction_ptr < mapping.start_address
                         || instruction_ptr >= mapping.start_address + mapping.size
                     {
@@ -154,22 +136,13 @@ impl MinidumpWriter {
                     ip_memory_d.memory.data_size =
                         (end_of_range - ip_memory_d.start_of_memory_range) as u32;
 
-                    let ip_copy = failspot!(if CrashingThreadIpCopy {
-                        Err(CopyFromProcessError::InvalidArgument)
-                    } else {
-                        MinidumpWriter::copy_from_process(
-                            self.process_inspector.as_ref(),
-                            ip_memory_d.start_of_memory_range as _,
-                            ip_memory_d.memory.data_size as usize,
-                        )
-                    });
-                    let memory_copy = match ip_copy {
-                        Ok(x) => x,
-                        Err(e) => {
-                            soft_errors.push(SectionThreadListError::CopyFromProcessError(e));
-                            break;
-                        }
-                    };
+                    let memory_copy = MinidumpWriter::copy_from_process(
+                        &self.process_inspector,
+                        thread.thread_id as i32,
+                        ip_memory_d.start_of_memory_range as _,
+                        ip_memory_d.memory.data_size as usize,
+                    )?;
+
                     let mem_section = MemoryArrayWriter::alloc_from_array(buffer, &memory_copy)?;
                     ip_memory_d.memory = mem_section.location();
                     self.memory_blocks.push(ip_memory_d);
@@ -185,10 +158,7 @@ impl MinidumpWriter {
                 self.crashing_thread_context =
                     CrashingThreadContext::CrashContext(cpu_section.location());
             } else {
-                let info = self.get_thread_info_by_index(
-                    idx,
-                    soft_errors.subwriter(SectionThreadListError::ThreadInfoSoftErrors),
-                )?;
+                let info = self.get_thread_info_by_index(idx)?;
                 let max_stack_len =
                     if self.minidump_size_limit.is_some() && idx >= LIMIT_BASE_THREAD_COUNT {
                         extra_thread_stack_len
@@ -202,7 +172,6 @@ impl MinidumpWriter {
                     instruction_ptr,
                     info.stack_pointer,
                     max_stack_len,
-                    &mut soft_errors,
                 )?;
 
                 let mut cpu = RawContextCPU::default();
@@ -230,74 +199,54 @@ impl MinidumpWriter {
         instruction_ptr: usize,
         stack_ptr: usize,
         max_stack_len: MaxStackLen,
-        mut soft_errors: impl WriteErrorList<SectionThreadListError>,
     ) -> Result<(), SectionThreadListError> {
         thread.stack.start_of_memory_range = stack_ptr.try_into()?;
         thread.stack.memory.data_size = 0;
         thread.stack.memory.rva = buffer.position() as u32;
 
-        let stack_info = failspot!(if StackPointerMapping {
-            Err(WriterError::NoStackPointerMapping)
-        } else {
-            self.get_stack_info(stack_ptr)
-        });
-        let (valid_stack_ptr, stack_len) = match stack_info {
-            Ok(x) => x,
-            Err(e) => {
-                soft_errors.push(SectionThreadListError::GetStackInfoFailed(Box::new(e)));
-                return Ok(());
-            }
-        };
+        if let Ok((valid_stack_ptr, stack_len)) = self.get_stack_info(stack_ptr) {
+            let stack_len = if let MaxStackLen::Len(max_stack_len) = max_stack_len {
+                min(stack_len, max_stack_len)
+            } else {
+                stack_len
+            };
 
-        let stack_len = if let MaxStackLen::Len(max_stack_len) = max_stack_len {
-            min(stack_len, max_stack_len)
-        } else {
-            stack_len
-        };
-
-        let stack_copy = failspot!(if ThreadStackCopy {
-            Err(CopyFromProcessError::InvalidArgument)
-        } else {
-            MinidumpWriter::copy_from_process(
-                self.process_inspector.as_ref(),
+            let mut stack_bytes = MinidumpWriter::copy_from_process(
+                &self.process_inspector,
+                thread.thread_id.try_into()?,
                 valid_stack_ptr,
                 stack_len,
-            )
-        });
-        let mut stack_bytes = match stack_copy {
-            Ok(x) => x,
-            Err(e) => {
-                soft_errors.push(SectionThreadListError::CopyFromProcessError(e));
-                return Ok(());
-            }
-        };
-        let stack_pointer_offset = stack_ptr.saturating_sub(valid_stack_ptr);
-        if self.skip_stacks_if_mapping_unreferenced {
-            if let Some(principal_mapping) = &self.principal_mapping {
-                if !principal_mapping.contains_address(instruction_ptr)
-                    && !principal_mapping
-                        .stack_has_pointer_to_mapping(&stack_bytes, stack_pointer_offset)
-                {
+            )?;
+            let stack_pointer_offset = stack_ptr.saturating_sub(valid_stack_ptr);
+            if self.skip_stacks_if_mapping_unreferenced {
+                if let Some(principal_mapping) = &self.principal_mapping {
+                    let low_addr = principal_mapping.system_mapping_info.start_address;
+                    let high_addr = principal_mapping.system_mapping_info.end_address;
+                    if (instruction_ptr < low_addr || instruction_ptr > high_addr)
+                        && !principal_mapping
+                            .stack_has_pointer_to_mapping(&stack_bytes, stack_pointer_offset)
+                    {
+                        return Ok(());
+                    }
+                } else {
                     return Ok(());
                 }
-            } else {
-                return Ok(());
             }
-        }
 
-        if self.sanitize_stack {
-            self.sanitize_stack_copy(&mut stack_bytes, stack_ptr, stack_pointer_offset)
-                .map_err(|e| SectionThreadListError::SanitizeStackCopyFailed(Box::new(e)))?;
-        }
+            if self.sanitize_stack {
+                self.sanitize_stack_copy(&mut stack_bytes, stack_ptr, stack_pointer_offset)
+                    .map_err(|e| SectionThreadListError::SanitizeStackCopyFailed(Box::new(e)))?;
+            }
 
-        let stack_location = MDLocationDescriptor {
-            data_size: stack_bytes.len() as u32,
-            rva: buffer.position() as u32,
-        };
-        buffer.write_all(&stack_bytes);
-        thread.stack.start_of_memory_range = valid_stack_ptr as u64;
-        thread.stack.memory = stack_location;
-        self.memory_blocks.push(thread.stack);
+            let stack_location = MDLocationDescriptor {
+                data_size: stack_bytes.len() as u32,
+                rva: buffer.position() as u32,
+            };
+            buffer.write_all(&stack_bytes);
+            thread.stack.start_of_memory_range = valid_stack_ptr as u64;
+            thread.stack.memory = stack_location;
+            self.memory_blocks.push(thread.stack);
+        }
         Ok(())
     }
 }

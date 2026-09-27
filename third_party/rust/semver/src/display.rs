@@ -56,6 +56,8 @@ impl Display for Comparator {
             Op::Tilde => "~",
             Op::Caret => "^",
             Op::Wildcard => "",
+            #[cfg(no_non_exhaustive)]
+            Op::__NonExhaustive => unreachable!(),
         };
         formatter.write_str(op)?;
         write!(formatter, "{}", self.major)?;
@@ -122,8 +124,9 @@ fn pad(
     do_display: impl FnOnce(&mut fmt::Formatter) -> fmt::Result,
     do_len: impl FnOnce() -> usize,
 ) -> fmt::Result {
-    let Some(min_width) = formatter.width() else {
-        return do_display(formatter);
+    let min_width = match formatter.width() {
+        Some(min_width) => min_width,
+        None => return do_display(formatter),
     };
 
     let len = do_len();

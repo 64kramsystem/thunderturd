@@ -10,21 +10,17 @@ use cubeb_backend::{
 };
 use pulse::{self, ProplistExt};
 use pulse_ffi::*;
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::default::Default;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_void};
+use std::os::raw::c_void;
 use std::ptr;
 
 #[derive(Debug)]
 pub struct DefaultInfo {
     pub sample_spec: pulse::SampleSpec,
     pub channel_map: pulse::ChannelMap,
-}
-
-fn log_cstr(s: *const c_char) -> Cow<'static, str> {
-    try_cstr_from(s).map_or(Cow::Borrowed("<null>"), CStr::to_string_lossy)
+    pub flags: pulse::SinkFlags,
 }
 
 pub const PULSE_OPS: Ops = capi_new!(PulseContext, PulseStream);
@@ -54,23 +50,15 @@ pub struct PulseContext {
 impl PulseContext {
     #[cfg(feature = "pulse-dlopen")]
     fn _new(name: Option<CString>) -> Result<Box<Self>> {
-        let libpulse = match unsafe { open() } {
-            Some(libpulse) => libpulse,
-            None => {
-                cubeb_log!("libpulse not found");
-                return Err(Error::Error);
-            }
-        };
-
-        if let Some(path) = libpulse.path() {
-            cubeb_log!("libpulse loaded from {}", path.to_string_lossy());
-        } else {
-            cubeb_log!("libpulse loaded from unknown path");
+        let libpulse = unsafe { open() };
+        if libpulse.is_none() {
+            cubeb_log!("libpulse not found");
+            return Err(Error::Error);
         }
 
         let ctx = Box::new(PulseContext {
             _ops: &PULSE_OPS,
-            libpulse,
+            libpulse: libpulse.unwrap(),
             mainloop: pulse::ThreadedMainloop::new(),
             context: None,
             default_sink_info: None,
@@ -116,16 +104,11 @@ impl PulseContext {
             let ctx = unsafe { &mut *(u as *mut PulseContext) };
             if eol == 0 {
                 let info = unsafe { &*i };
-                cubeb_log!(
-                    "PulseAudio default sink info: name={}, description={}, driver={}, latency={}",
-                    log_cstr(info.name),
-                    log_cstr(info.description),
-                    log_cstr(info.driver),
-                    info.latency
-                );
+                let flags = pulse::SinkFlags::from_bits_truncate(info.flags);
                 ctx.default_sink_info = Some(DefaultInfo {
                     sample_spec: info.sample_spec,
                     channel_map: info.channel_map,
+                    flags,
                 });
             }
             ctx.mainloop.signal();
@@ -133,13 +116,6 @@ impl PulseContext {
 
         if let Some(info) = info {
             let ctx = unsafe { &mut *(u as *mut PulseContext) };
-            cubeb_log!(
-                "PulseAudio server info: server_name={}, server_version={}, default_sink_name={}, default_source_name={}",
-                log_cstr(info.server_name),
-                log_cstr(info.server_version),
-                log_cstr(info.default_sink_name),
-                log_cstr(info.default_source_name)
-            );
 
             // Check if default devices changed, and call the appropriate callback if present.
             let new_sink_name = try_cstr_from(info.default_sink_name).map(|s| s.to_owned());

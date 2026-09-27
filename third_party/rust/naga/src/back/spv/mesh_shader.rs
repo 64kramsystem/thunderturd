@@ -10,13 +10,12 @@ use crate::{
     Handle,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MeshReturnMember {
     pub ty_id: u32,
     pub binding: crate::Binding,
 }
 
-#[derive(Debug)]
 struct PerOutputTypeMeshReturnInfo {
     max_length_constant: Word,
     array_type_id: Word,
@@ -31,7 +30,6 @@ struct PerOutputTypeMeshReturnInfo {
     bindings: Vec<Word>,
 }
 
-#[derive(Debug)]
 pub struct MeshReturnInfo {
     /// Id of the workgroup variable containing the data to be output
     out_variable_id: Word,
