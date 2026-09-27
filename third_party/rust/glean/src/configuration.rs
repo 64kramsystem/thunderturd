@@ -5,6 +5,7 @@
 use log::LevelFilter;
 
 use crate::net::PingUploader;
+use crate::SessionMode;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -58,6 +59,16 @@ pub struct Configuration {
     pub ping_lifetime_threshold: usize,
     /// After what time to auto-flush. 0 disables it.
     pub ping_lifetime_max_time: Duration,
+    /// Session management mode. Default: `Auto`.
+    pub session_mode: SessionMode,
+    /// Session sampling rate (0.0–1.0). Default: `1.0`.
+    pub session_sample_rate: f64,
+    /// Inactivity timeout for AUTO mode sessions. Default: 30 minutes.
+    pub session_inactivity_timeout: Duration,
+    /// The number of "events" pings to accelerate each session, plus one.
+    pub events_ping_acceleration_factor: Option<usize>,
+    /// Whether to store submitted pings or not
+    pub enable_store_submitted_pings: bool,
 }
 
 /// Configuration builder.
@@ -114,6 +125,16 @@ pub struct Builder {
     pub ping_lifetime_threshold: usize,
     /// After what time to auto-flush. 0 disables it.
     pub ping_lifetime_max_time: Duration,
+    /// Session management mode. Default: `Auto`.
+    pub session_mode: SessionMode,
+    /// Session sampling rate (0.0–1.0). Default: `1.0`.
+    pub session_sample_rate: f64,
+    /// Inactivity timeout for AUTO mode sessions. Default: 30 minutes.
+    pub session_inactivity_timeout: Duration,
+    /// The number of "events" pings to accelerate each session, plus one.
+    pub events_ping_acceleration_factor: Option<usize>,
+    /// Whether to store submitted pings or not.
+    pub enable_store_submitted_pings: bool,
 }
 
 impl Builder {
@@ -141,6 +162,11 @@ impl Builder {
             ping_schedule: HashMap::new(),
             ping_lifetime_threshold: 0,
             ping_lifetime_max_time: Duration::ZERO,
+            session_mode: SessionMode::Auto,
+            session_sample_rate: 1.0,
+            session_inactivity_timeout: Duration::from_secs(30 * 60),
+            events_ping_acceleration_factor: None,
+            enable_store_submitted_pings: false,
         }
     }
 
@@ -164,7 +190,30 @@ impl Builder {
             ping_schedule: self.ping_schedule,
             ping_lifetime_threshold: self.ping_lifetime_threshold,
             ping_lifetime_max_time: self.ping_lifetime_max_time,
+            session_mode: self.session_mode,
+            session_sample_rate: self.session_sample_rate,
+            session_inactivity_timeout: self.session_inactivity_timeout,
+            events_ping_acceleration_factor: self.events_ping_acceleration_factor,
+            enable_store_submitted_pings: self.enable_store_submitted_pings,
         }
+    }
+
+    /// Set the session management mode.
+    pub fn with_session_mode(mut self, mode: SessionMode) -> Self {
+        self.session_mode = mode;
+        self
+    }
+
+    /// Set the session sampling rate (0.0–1.0).
+    pub fn with_session_sample_rate(mut self, rate: f64) -> Self {
+        self.session_sample_rate = rate;
+        self
+    }
+
+    /// Set the inactivity timeout for AUTO mode session boundaries.
+    pub fn with_session_inactivity_timeout(mut self, timeout: Duration) -> Self {
+        self.session_inactivity_timeout = timeout;
+        self
     }
 
     /// Set the maximum number of events to store before sending a ping containing events.
@@ -203,6 +252,12 @@ impl Builder {
         self
     }
 
+    /// Set the rate pings may be uploaded before they are throttled.
+    pub fn with_rate_limit(mut self, limit: crate::PingRateLimit) -> Self {
+        self.rate_limit = Some(limit);
+        self
+    }
+
     /// Set whether to add a wallclock timestamp to all events (experimental).
     pub fn with_event_timestamps(mut self, value: bool) -> Self {
         self.enable_event_timestamps = value;
@@ -236,6 +291,18 @@ impl Builder {
     /// After what time to auto-flush. 0 disables it.
     pub fn with_ping_lifetime_max_time(mut self, value: Duration) -> Self {
         self.ping_lifetime_max_time = value;
+        self
+    }
+
+    /// Set the number of "events" pings to accelerate each session, plus one.
+    pub fn with_events_ping_acceleration_factor(mut self, factor: usize) -> Self {
+        self.events_ping_acceleration_factor = Some(factor);
+        self
+    }
+
+    /// Set whether to store submitted pings or not.
+    pub fn with_store_submitted_pings_enabled(mut self, value: bool) -> Self {
+        self.enable_store_submitted_pings = value;
         self
     }
 }

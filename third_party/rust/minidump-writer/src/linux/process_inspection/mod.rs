@@ -1,323 +1,287 @@
-use {
-    super::{
-        Pid, maps_reader,
-        module_reader::{ModuleReaderError, ReadModuleMemory},
-        serializers::{self, *},
-    },
-    crate::serializers::*,
-    core::{ffi::c_void, mem},
-    module_reader::MappedModuleMemoryReader,
-    nix::{
-        errno::Errno,
-        sys::{ptrace, signal, wait},
-        unistd::Pid as NixPid,
-    },
-    process_reader::ProcessReader,
-    regs::*,
-    std::{
-        ffi::{CString, OsString},
-        fs::{self, File},
-        io::{self, Read},
-        os::unix::ffi::OsStringExt,
-        path::{Path, PathBuf},
-    },
+use super::super::linux;
+use crate::module_reader::{ModuleMemoryReadError, ReadError, ReadModuleMemory};
+use linux::maps_reader;
+use process_backend::{ProcessReader as _, Stat, local, regs::*};
+use process_reader::{CopyFromProcessError, ProcessReader, ProcessReaderBackend};
+use std::{
+    borrow::Cow,
+    ffi::{CString, OsString, c_int},
+    io,
+    os::unix::ffi::OsStringExt,
+    path::PathBuf,
 };
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use process_backend::PTRACE_DATA_LEN;
+
+pub(crate) use process_backend::regs;
+
+pub use process_backend::ProcessReaderKind;
+
 pub mod process_reader;
-pub mod regs;
 
-mod module_reader;
+pub(crate) type Result<T> = core::result::Result<T, Error>;
 
-#[cfg(target_env = "gnu")]
-type PtraceRequestType = core::ffi::c_uint;
+// These are both arbitrary choices and may need to be tweaked
+const MAX_PATH_LEN: usize = 65536;
+const MAX_DIRECTORY_NAME_LENGTH: usize = 256;
 
-#[cfg(not(target_env = "gnu"))]
-type PtraceRequestType = core::ffi::c_int;
-
-#[derive(Debug)]
-pub struct ProcessInspector {
-    pid: libc::pid_t,
-    process_reader: ProcessReader,
+pub(crate) fn local(pid: libc::pid_t) -> Box<dyn ProcessInspector> {
+    set_process_backend_drop_fail_handler();
+    Box::new(local::Backend::new(pid))
 }
 
-impl ProcessInspector {
-    pub fn local(pid: libc::pid_t) -> Self {
-        ProcessInspector {
-            pid,
-            process_reader: ProcessReader::new(pid),
-        }
-    }
-
-    pub fn process_reader(&self) -> &ProcessReader {
-        &self.process_reader
-    }
-
-    pub fn stop_process(&self) -> Result<(), Errno> {
-        signal::kill(NixPid::from_raw(self.pid), Some(signal::SIGSTOP))
-    }
-
-    pub fn continue_process(&self) -> Result<(), Errno> {
-        signal::kill(NixPid::from_raw(self.pid), Some(signal::SIGCONT))
-    }
-
-    pub fn suspend_thread(&self, tid: libc::pid_t) -> Result<(), SuspendResumeThreadError> {
-        let tid = NixPid::from_raw(tid);
-        ptrace::attach(tid).map_err(SuspendResumeThreadError::PtraceAttachFailed)?;
-        loop {
-            match wait::waitpid(tid, Some(wait::WaitPidFlag::__WALL)) {
-                Ok(status) => {
-                    let wait::WaitStatus::Stopped(_, signal) = status else {
-                        return Err(SuspendResumeThreadError::UnexpectedStatus(status));
-                    };
-
-                    // Any signal will stop the thread, make sure it is SIGSTOP. Otherwise, this
-                    // signal will be delivered after PTRACE_DETACH, and the thread will enter
-                    // the "T (stopped)" state.
-                    if signal == signal::SIGSTOP {
-                        break;
-                    }
-
-                    // Signals other than SIGSTOP that are received need to be reinjected,
-                    // or they will otherwise get lost.
-                    ptrace::cont(tid, signal)
-                        .map_err(|e| SuspendResumeThreadError::ReinjectFailed(e, signal))?;
-                }
-                Err(Errno::EINTR) => (),
-                Err(e) => {
-                    ptrace_detach(tid).map_err(SuspendResumeThreadError::PtraceDetachFailed)?;
-                    return Err(SuspendResumeThreadError::WaitPidFailed(e));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn resume_thread(&self, tid: libc::pid_t) -> Result<(), SuspendResumeThreadError> {
-        let tid = NixPid::from_raw(tid);
-        ptrace_detach(tid).map_err(SuspendResumeThreadError::PtraceDetachFailed)
-    }
-
-    pub fn read_memory_mapped_module(
-        &self,
-        path: impl AsRef<Path>,
+pub trait ProcessInspector: core::fmt::Debug {
+    fn process_reader<'a>(&'a self) -> ProcessReader<'a>;
+    fn pid(&self) -> Result<libc::pid_t>;
+    fn stop_process(&self) -> Result<()>;
+    fn continue_process(&self) -> Result<()>;
+    fn suspend_thread(&self, tid: libc::pid_t) -> Result<()>;
+    fn resume_thread(&self, tid: libc::pid_t) -> Result<()>;
+    fn map_module_into_memory<'a>(
+        &'a self,
+        path: PathBuf,
         offset: u64,
-    ) -> Result<MappedModuleMemoryReader, ModuleReaderError> {
-        MappedModuleMemoryReader::new(path.as_ref(), offset)
+    ) -> Result<MappedModuleMemoryReader<'a>>;
+    fn stat_file(&self, path: PathBuf) -> Result<Stat>;
+    fn read_file<'a>(&'a self, path: PathBuf) -> Result<FileReader<'a>>;
+    fn read_dir<'a>(&'a self, path: PathBuf) -> Result<DirReader<'a>>;
+    fn read_link(&self, path: PathBuf) -> Result<PathBuf>;
+    fn get_gen_regs(&self, tid: libc::pid_t) -> Result<GenRegs>;
+    fn get_fp_regs(&self, tid: libc::pid_t) -> Result<FpRegs>;
+
+    #[cfg(target_arch = "x86")]
+    fn get_fpx_regs(&self, tid: libc::pid_t) -> Result<FpxRegs>;
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn ptrace_peekuser(&self, addr: usize) -> Result<[u8; PTRACE_DATA_LEN]>;
+
+    fn force_process_reader_kind(&mut self, kind: ProcessReaderKind) -> Result<()>;
+
+    fn fail_one_syscall_with(&self, errno: core::ffi::c_int);
+}
+
+impl<B: process_backend::Backend> ProcessInspector for B {
+    fn process_reader<'a>(&'a self) -> ProcessReader<'a> {
+        ProcessReader::new(self)
     }
 
-    pub fn stat_file(&self, path: impl Into<PathBuf>) -> io::Result<libc::stat> {
-        let c_path = CString::new(path.into().into_os_string().into_vec()).unwrap();
-
-        let mut output = unsafe { mem::zeroed::<libc::stat>() };
-        let rv = unsafe { libc::stat(c_path.as_ptr(), &mut output) };
-        if rv == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(output)
+    fn pid(&self) -> Result<libc::pid_t> {
+        B::pid(self).map_err(Error::Backend)
     }
 
-    pub fn read_file(&self, path: impl AsRef<Path>) -> io::Result<FileReader> {
-        File::open(path).map(FileReader)
+    fn stop_process(&self) -> Result<()> {
+        B::stop_process(self).map_err(Error::Backend)
     }
 
-    pub fn read_dir(&self, path: impl AsRef<Path>) -> io::Result<DirReader> {
-        fs::read_dir(path).map(DirReader)
+    fn continue_process(&self) -> Result<()> {
+        B::continue_process(self).map_err(Error::Backend)
     }
 
-    pub fn read_link(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
-        fs::read_link(path)
+    fn suspend_thread(&self, tid: libc::pid_t) -> Result<()> {
+        B::suspend_thread(self, tid).map_err(Error::Backend)
     }
 
-    pub fn path_exists(&self, path: impl AsRef<Path>) -> bool {
-        path.as_ref().exists()
+    fn resume_thread(&self, tid: libc::pid_t) -> Result<()> {
+        B::resume_thread(self, tid).map_err(Error::Backend)
     }
 
-    pub fn get_gen_regs(&self, tid: libc::pid_t) -> nix::Result<GenRegs> {
-        getregset(tid).or_else(|_| getregs(tid))
+    fn map_module_into_memory<'a>(
+        &'a self,
+        path: PathBuf,
+        offset: u64,
+    ) -> Result<MappedModuleMemoryReader<'a>> {
+        let c_path = CString::new(path.into_os_string().into_vec()).unwrap();
+        let reader = B::map_module_into_memory(self, &c_path, offset).map_err(Error::Backend)?;
+        Ok(MappedModuleMemoryReader(Box::new(reader)))
     }
 
-    pub fn get_fp_regs(&self, tid: libc::pid_t) -> nix::Result<FpRegs> {
-        getfpregset(tid).or_else(|_| getfpregs(tid))
+    fn stat_file(&self, path: PathBuf) -> Result<Stat> {
+        let c_path = CString::new(path.into_os_string().into_vec()).unwrap();
+        B::stat_file(self, &c_path).map_err(Error::Backend)
+    }
+
+    fn read_file<'a>(&'a self, path: PathBuf) -> Result<FileReader<'a>> {
+        let c_path = CString::new(path.into_os_string().into_vec()).unwrap();
+        let reader = B::read_file(self, &c_path).map_err(Error::Backend)?;
+        Ok(FileReader(Box::new(reader)))
+    }
+
+    fn read_dir<'a>(&'a self, path: PathBuf) -> Result<DirReader<'a>> {
+        let c_path = CString::new(path.into_os_string().into_vec()).unwrap();
+        let reader = B::read_dir(self, &c_path).map_err(Error::Backend)?;
+        Ok(DirReader(Box::new(reader)))
+    }
+
+    fn read_link(&self, path: PathBuf) -> Result<PathBuf> {
+        let c_path = CString::new(path.into_os_string().into_vec()).unwrap();
+        let mut buf = vec![0u8; MAX_PATH_LEN];
+        let len = B::read_link(self, &c_path, &mut buf).map_err(Error::Backend)?;
+        buf.truncate(len);
+        Ok(PathBuf::from(OsString::from_vec(buf)))
+    }
+    fn get_gen_regs(&self, tid: libc::pid_t) -> Result<GenRegs> {
+        B::get_gen_regs(self, tid).map_err(Error::Backend)
+    }
+
+    fn get_fp_regs(&self, tid: libc::pid_t) -> Result<FpRegs> {
+        B::get_fp_regs(self, tid).map_err(Error::Backend)
     }
 
     #[cfg(target_arch = "x86")]
-    pub fn get_fpx_regs(&self, tid: libc::pid_t) -> nix::Result<FpxRegs> {
-        const PTRACE_GETFPXREGS: PtraceRequestType = 18;
-        unsafe { ptrace_getregs::<FpxRegs>(PTRACE_GETFPXREGS, tid) }
+    fn get_fpx_regs(&self, tid: libc::pid_t) -> Result<FpxRegs> {
+        B::get_fpx_regs(self, tid).map_err(Error::Backend)
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub fn ptrace_peekuser(
+    fn ptrace_peekuser(&self, addr: usize) -> Result<[u8; PTRACE_DATA_LEN]> {
+        B::ptrace_peekuser(self, addr).map_err(Error::Backend)
+    }
+
+    fn force_process_reader_kind(&mut self, kind: ProcessReaderKind) -> Result<()> {
+        B::force_process_reader_kind(self, kind).map_err(Error::Backend)
+    }
+
+    #[doc(hidden)]
+    fn fail_one_syscall_with(&self, errno: c_int) {
+        B::fail_one_syscall_with(self, errno)
+    }
+}
+
+impl<B: process_backend::Backend> ProcessReaderBackend for B {
+    fn process_inspector(&self) -> &dyn ProcessInspector {
+        self
+    }
+
+    fn read_at(
         &self,
-        pid: libc::pid_t,
-        addr: usize,
-    ) -> nix::Result<[u8; mem::size_of::<libc::c_long>()]> {
-        // Since ptrace() is vararg, best to explicitly state arg types
-        let addr: *mut libc::c_void = addr as *mut libc::c_void;
-        let data: *mut libc::c_void = core::ptr::null_mut();
-        Errno::set_raw(0);
-        let rv = unsafe { libc::ptrace(libc::PTRACE_PEEKUSER, pid, addr, data) };
-        if rv == -1 && Errno::last_raw() != 0 {
-            Err(Errno::last())
-        } else {
-            Ok(rv.to_ne_bytes())
+        src: usize,
+        dst: &mut [u8],
+    ) -> core::result::Result<usize, CopyFromProcessError> {
+        B::process_reader(self)
+            .read_at(src, dst)
+            .map_err(|e| CopyFromProcessError::Backend(Error::Backend(e)))
+    }
+}
+
+#[derive(Debug)]
+pub struct FileReader<'a>(Box<dyn process_backend::FileReader + 'a>);
+
+impl<'a> io::Read for FileReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0
+            .read(buf)
+            .map_err(Error::Backend)
+            .map_err(io::Error::other)
+    }
+}
+
+#[derive(Debug)]
+pub struct DirReader<'a>(Box<dyn process_backend::DirReader + 'a>);
+
+impl<'a> Iterator for DirReader<'a> {
+    type Item = Result<OsString>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut buf = vec![0; MAX_DIRECTORY_NAME_LENGTH];
+        match self.0.read_next_name(&mut buf).map_err(Error::Backend) {
+            Ok(0) => None,
+            Ok(len) => {
+                buf.truncate(len);
+                Some(Ok(OsString::from_vec(buf)))
+            }
+            Err(e) => Some(Err(e)),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct FileReader(File);
+pub struct MappedModuleMemoryReader<'a>(Box<dyn process_backend::MappedModuleMemoryReader + 'a>);
 
-impl Read for FileReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
+impl<'a> MappedModuleMemoryReader<'a> {
+    pub fn read_exact_at(&self, mut offset: usize, mut buf: &mut [u8]) -> Result<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+
+        loop {
+            let bytes_read = self.0.read_at(offset, buf).map_err(Error::Backend)?;
+            if bytes_read == 0 {
+                return Err(Error::UnexpectedEndOfBuffer);
+            }
+
+            if bytes_read == buf.len() {
+                return Ok(());
+            }
+
+            offset = offset
+                .checked_add(bytes_read)
+                .ok_or(Error::AddressOverflowed)?;
+            buf = &mut buf[bytes_read..];
+        }
+    }
+    pub fn len(&self) -> Result<usize> {
+        self.0.len().map_err(Error::Backend)
     }
 }
 
-#[derive(Debug)]
-pub struct DirReader(fs::ReadDir);
+impl<'a> ReadModuleMemory for MappedModuleMemoryReader<'a> {
+    fn read(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> core::result::Result<Cow<'_, [u8]>, ModuleMemoryReadError> {
+        let result = (|| {
+            let (offset, length) = match (usize::try_from(offset), usize::try_from(length)) {
+                (Ok(o), Ok(l)) => (o, l),
+                _ => return Err(ReadError::OutOfBounds),
+            };
 
-impl Iterator for DirReader {
-    type Item = io::Result<OsString>;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0
-            .next()
-            .map(|result| result.map(|entry| entry.file_name()))
+            let mut buf = vec![0u8; length];
+
+            self.read_exact_at(offset, &mut buf)
+                .map_err(ReadError::PlatformSpecific)?;
+
+            Ok(buf)
+        })();
+
+        result
+            .map(Cow::Owned)
+            .map_err(|error| ModuleMemoryReadError {
+                offset,
+                length,
+                start_address: None,
+                error,
+            })
+    }
+    fn absolute_to_relative(&self, addr: u64) -> Option<u64> {
+        Some(addr)
+    }
+    /// Calculates the absolute address of the specified relative address
+    fn relative_to_absolute(&self, addr: u64) -> Option<u64> {
+        Some(addr)
+    }
+    fn is_process_memory(&self) -> bool {
+        false
     }
 }
 
 #[derive(Debug, thiserror::Error, serde::Serialize)]
-pub enum SuspendResumeThreadError {
-    #[error("failed to attach to process")]
-    PtraceAttachFailed(
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        Errno,
-    ),
-    #[error("failed to detach from process")]
-    PtraceDetachFailed(
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        Errno,
-    ),
-    #[error("received an unexpected status: {0:?}")]
-    UnexpectedStatus(#[serde(serialize_with = "serialize_debug_string")] wait::WaitStatus),
-    #[error("failed to reinject irrelevant signal: {1:?}")]
-    ReinjectFailed(
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        Errno,
-        #[serde(serialize_with = "serialize_debug_string")] signal::Signal,
-    ),
-    #[error("failed waiting for process state to change")]
-    WaitPidFailed(
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        Errno,
-    ),
+pub enum Error {
+    #[error("an error occurred running the backend")]
+    Backend(#[source] process_backend::Error),
+    #[error("an address overflowed")]
+    AddressOverflowed,
+    #[error("unexpected end of buffer reached")]
+    UnexpectedEndOfBuffer,
+    #[error("got an unexpected end of file")]
+    UnexpectedEndOfFile,
 }
 
-fn getregset(_pid: libc::pid_t) -> nix::Result<GenRegs> {
-    #[cfg(target_arch = "arm")]
-    {
-        Err(Errno::ENOTSUP)
+fn set_process_backend_drop_fail_handler() {
+    fn drop_fail_handler(args: core::fmt::Arguments<'_>) {
+        log::error!("a drop() error occurred in process-backend: {args}");
     }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        const NT_PRSTATUS: usize = 1;
-        ptrace_getregset(NT_PRSTATUS, _pid)
-    }
-}
-
-fn getregs(pid: libc::pid_t) -> nix::Result<GenRegs> {
-    const PTRACE_GETREGS: PtraceRequestType = 12;
-    unsafe { ptrace_getregs::<GenRegs>(PTRACE_GETREGS, pid) }
-}
-
-fn getfpregset(pid: libc::pid_t) -> nix::Result<FpRegs> {
-    #[cfg(target_arch = "arm")]
-    {
-        const NT_ARM_VFP: usize = 0x400;
-        ptrace_getregset(NT_ARM_VFP, pid)
-    }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        const NT_PRFPREGSET: usize = 2;
-        ptrace_getregset(NT_PRFPREGSET, pid)
-    }
-}
-
-fn getfpregs(_pid: libc::pid_t) -> nix::Result<FpRegs> {
-    #[cfg(target_arch = "arm")]
-    {
-        Err(Errno::ENOTSUP)
-    }
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        const PTRACE_GETFPREGS: PtraceRequestType = 14;
-        unsafe { ptrace_getregs::<FpRegs>(PTRACE_GETFPREGS, _pid) }
-    }
-}
-
-/// Safety: RequestType and T must agree on the size of the returned type
-unsafe fn ptrace_getregs<T>(request: PtraceRequestType, pid: libc::pid_t) -> nix::Result<T> {
-    let mut output = mem::MaybeUninit::<T>::uninit();
-
-    // Since ptrace() is vararg, best to explicitly state arg types
-    let addr: *mut c_void = core::ptr::null_mut();
-    let data: *mut c_void = output.as_mut_ptr().cast();
-    let res = unsafe { libc::ptrace(request, pid, addr, data) };
-    Errno::result(res)?;
-    Ok(unsafe { output.assume_init() })
-}
-
-fn ptrace_getregset<T>(regset_type: usize, pid: libc::pid_t) -> nix::Result<T> {
-    let mut output = mem::MaybeUninit::<T>::uninit();
-    let mut io = libc::iovec {
-        iov_base: output.as_mut_ptr().cast(),
-        iov_len: mem::size_of::<T>(),
-    };
-
-    // Since ptrace() is vararg, best to explicitly state arg types
-    let addr: *mut c_void = regset_type as *mut c_void;
-    let data: *mut c_void = (&raw mut io).cast();
-    let res = unsafe { libc::ptrace(libc::PTRACE_GETREGSET, pid, addr, data) };
-    Errno::result(res)?;
-
-    // PTRACE_GETREGSET returns the number of bytes actually read in iov_len. Need to ensure
-    // all bytes of T are actually initialized
-    if io.iov_len != mem::size_of::<T>() {
-        return Err(Errno::EINVAL);
-    }
-
-    Ok(unsafe { output.assume_init() })
-}
-
-fn ptrace_detach(tid: NixPid) -> Result<(), Errno> {
-    ptrace::detach(tid, None).or_else(|e| {
-        // errno is set to ESRCH if the pid no longer exists, but we don't want to error in that
-        // case.
-        if e == nix::Error::ESRCH {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
-}
-
-#[doc(hidden)]
-impl ProcessInspector {
-    pub fn force_pr_reset(&mut self) {
-        self.process_reader = ProcessReader::new(self.pid)
-    }
-    pub fn force_pr_virtual_mem(&mut self) {
-        self.process_reader = ProcessReader::for_virtual_mem(self.pid)
-    }
-    pub fn force_pr_file(&mut self) -> std::io::Result<()> {
-        self.process_reader = ProcessReader::for_file(self.pid)?;
-        Ok(())
-    }
-    pub fn force_pr_ptrace(&mut self) {
-        self.process_reader = ProcessReader::for_ptrace(self.pid);
-    }
+    const HANDLER: process_backend::DropFailHandler =
+        process_backend::DropFailHandler::new(drop_fail_handler);
+    HANDLER.install_global();
 }

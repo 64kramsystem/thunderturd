@@ -72,6 +72,11 @@ Otherwise, we pass a range corresponding only to the current bind group.
 
 !*/
 
+#![expect(
+    missing_debug_implementations,
+    reason = "TODO: someone developing on Windows add Debug impls where possible"
+)]
+
 mod adapter;
 mod command;
 mod conv;
@@ -88,12 +93,13 @@ mod types;
 mod view;
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
-use core::{ffi, fmt, mem, ops::Deref, sync::atomic::AtomicU64};
+use core::{ffi, fmt, mem, ops::Deref};
 
 use arrayvec::ArrayVec;
 use hashbrown::HashMap;
-use parking_lot::{Mutex, RwLock};
 use suballocation::Allocator;
+use wgpu_sync::atomic::AtomicU64;
+use wgpu_sync::{Mutex, RwLock};
 use windows::{
     core::{Free as _, Interface},
     Win32::{
@@ -111,46 +117,19 @@ use self::dcomp::DCompLib;
 use crate::auxil::{
     self,
     dxgi::{
+        dxgi_lib::DxgiLib,
         factory::{DxgiAdapter, DxgiFactory},
         result::HResult,
     },
+    dyn_lib::DynLib,
 };
-
-#[derive(Debug)]
-struct DynLib {
-    inner: libloading::Library,
-}
-
-impl DynLib {
-    unsafe fn new<P>(filename: P) -> Result<Self, libloading::Error>
-    where
-        P: AsRef<std::ffi::OsStr>,
-    {
-        unsafe { libloading::Library::new(filename) }.map(|inner| Self { inner })
-    }
-
-    unsafe fn get<T>(
-        &self,
-        symbol: &[u8],
-    ) -> Result<libloading::Symbol<'_, T>, crate::DeviceError> {
-        unsafe { self.inner.get(symbol) }.map_err(|e| match e {
-            libloading::Error::GetProcAddress { .. } | libloading::Error::GetProcAddressUnknown => {
-                crate::DeviceError::Unexpected
-            }
-            libloading::Error::IncompatibleSize
-            | libloading::Error::CreateCString { .. }
-            | libloading::Error::CreateCStringWithTrailing { .. } => crate::hal_internal_error(e),
-            _ => crate::DeviceError::Unexpected, // could be unreachable!() but we prefer to be more robust
-        })
-    }
-}
 
 #[derive(Debug)]
 struct D3D12Lib {
     lib: DynLib,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum CreateDeviceError {
     GetProcAddress,
     D3D12CreateDevice(windows_core::HRESULT),
@@ -316,91 +295,6 @@ impl fmt::Display for GetInterfaceError {
 
 impl core::error::Error for GetInterfaceError {}
 
-#[derive(Debug)]
-pub(super) struct DxgiLib {
-    lib: DynLib,
-}
-
-impl DxgiLib {
-    pub fn new() -> Result<Self, libloading::Error> {
-        unsafe { DynLib::new("dxgi.dll").map(|lib| Self { lib }) }
-    }
-
-    /// Will error with crate::DeviceError::Unexpected if DXGI 1.3 is not available.
-    pub fn debug_interface1(&self) -> Result<Option<Dxgi::IDXGIInfoQueue>, crate::DeviceError> {
-        // Calls windows::Win32::Graphics::Dxgi::DXGIGetDebugInterface1 on dxgi.dll
-        type Fun = extern "system" fn(
-            flags: u32,
-            riid: *const windows_core::GUID,
-            pdebug: *mut *mut ffi::c_void,
-        ) -> windows_core::HRESULT;
-        let func: libloading::Symbol<Fun> =
-            unsafe { self.lib.get(c"DXGIGetDebugInterface1".to_bytes()) }?;
-
-        let mut result__ = None;
-
-        let res = (func)(0, &Dxgi::IDXGIInfoQueue::IID, <*mut _>::cast(&mut result__)).ok();
-
-        if let Err(ref err) = res {
-            match err.code() {
-                Dxgi::DXGI_ERROR_SDK_COMPONENT_MISSING => return Ok(None),
-                _ => {}
-            }
-        }
-
-        res.into_device_result("debug_interface1")?;
-
-        result__.ok_or(crate::DeviceError::Unexpected).map(Some)
-    }
-
-    /// Will error with crate::DeviceError::Unexpected if DXGI 1.4 is not available.
-    pub fn create_factory4(
-        &self,
-        factory_flags: Dxgi::DXGI_CREATE_FACTORY_FLAGS,
-    ) -> Result<Dxgi::IDXGIFactory4, crate::DeviceError> {
-        // Calls windows::Win32::Graphics::Dxgi::CreateDXGIFactory2 on dxgi.dll
-        type Fun = extern "system" fn(
-            flags: Dxgi::DXGI_CREATE_FACTORY_FLAGS,
-            riid: *const windows_core::GUID,
-            ppfactory: *mut *mut ffi::c_void,
-        ) -> windows_core::HRESULT;
-        let func: libloading::Symbol<Fun> =
-            unsafe { self.lib.get(c"CreateDXGIFactory2".to_bytes()) }?;
-
-        let mut result__ = None;
-
-        (func)(
-            factory_flags,
-            &Dxgi::IDXGIFactory4::IID,
-            <*mut _>::cast(&mut result__),
-        )
-        .ok()
-        .into_device_result("create_factory4")?;
-
-        result__.ok_or(crate::DeviceError::Unexpected)
-    }
-
-    /// Will error with crate::DeviceError::Unexpected if DXGI 1.3 is not available.
-    pub fn create_factory_media(&self) -> Result<Dxgi::IDXGIFactoryMedia, crate::DeviceError> {
-        // Calls windows::Win32::Graphics::Dxgi::CreateDXGIFactory1 on dxgi.dll
-        type Fun = extern "system" fn(
-            riid: *const windows_core::GUID,
-            ppfactory: *mut *mut ffi::c_void,
-        ) -> windows_core::HRESULT;
-        let func: libloading::Symbol<Fun> =
-            unsafe { self.lib.get(c"CreateDXGIFactory1".to_bytes()) }?;
-
-        let mut result__ = None;
-
-        // https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nn-dxgi1_3-idxgifactorymedia
-        (func)(&Dxgi::IDXGIFactoryMedia::IID, <*mut _>::cast(&mut result__))
-            .ok()
-            .into_device_result("create_factory_media")?;
-
-        result__.ok_or(crate::DeviceError::Unexpected)
-    }
-}
-
 /// Create a temporary "owned" copy inside a [`mem::ManuallyDrop`] without increasing the refcount or
 /// moving away the source variable.
 ///
@@ -478,6 +372,7 @@ impl crate::Api for Api {
     type ShaderModule = ShaderModule;
     type RenderPipeline = RenderPipeline;
     type ComputePipeline = ComputePipeline;
+    type RayTracingPipeline = RayTracingPipeline;
     type PipelineCache = PipelineCache;
 
     type AccelerationStructure = AccelerationStructure;
@@ -499,6 +394,7 @@ crate::impl_dyn_resource!(
     PipelineLayout,
     QuerySet,
     Queue,
+    RayTracingPipeline,
     RenderPipeline,
     Sampler,
     ShaderModule,
@@ -551,6 +447,7 @@ impl Instance {
             supports_allow_tearing: self.supports_allow_tearing,
             swap_chain: RwLock::new(None),
             options: self.options.clone(),
+            hdr_source: None,
         }
     }
 
@@ -569,6 +466,7 @@ impl Instance {
             supports_allow_tearing: self.supports_allow_tearing,
             swap_chain: RwLock::new(None),
             options: self.options.clone(),
+            hdr_source: None,
         }
     }
 
@@ -586,6 +484,7 @@ impl Instance {
             supports_allow_tearing: self.supports_allow_tearing,
             swap_chain: RwLock::new(None),
             options: self.options.clone(),
+            hdr_source: None,
         }
     }
 }
@@ -628,6 +527,9 @@ pub struct Surface {
     supports_allow_tearing: bool,
     swap_chain: RwLock<Option<SwapChain>>,
     options: wgt::Dx12BackendOptions,
+    /// HDR-info source for HWND-backed targets; `None` for composition /
+    /// SwapChainPanel / surface-handle targets, which have no monitor identity.
+    hdr_source: Option<auxil::dxgi::hdr::DxgiHdrSource>,
 }
 
 unsafe impl Send for Surface {}
@@ -964,6 +866,8 @@ impl PassState {
     }
 }
 
+// Any state in this struct that may be dirty after an abandoned encoding must
+// be reset for reused encoders in `begin_encoding`.
 pub struct CommandEncoder {
     allocator: Direct3D12::ID3D12CommandAllocator,
     device: Direct3D12::ID3D12Device,
@@ -1160,8 +1064,14 @@ pub struct TextureView {
     handle_srv: Option<descriptor::Handle>,
     handle_uav: Option<descriptor::Handle>,
     handle_rtv: Option<descriptor::Handle>,
-    handle_dsv_ro: Option<descriptor::Handle>,
+    /// Depth write stencil read-only view.
+    handle_dsv_wr: Option<descriptor::Handle>,
+    /// Depth read-only stencil write view.
     handle_dsv_rw: Option<descriptor::Handle>,
+    /// Depth read-only stencil read-only view.
+    handle_dsv_rr: Option<descriptor::Handle>,
+    /// Depth write stencil write view.
+    handle_dsv_ww: Option<descriptor::Handle>,
 }
 
 impl crate::DynTextureView for TextureView {}
@@ -1381,6 +1291,11 @@ unsafe impl Send for ComputePipeline {}
 unsafe impl Sync for ComputePipeline {}
 
 #[derive(Debug)]
+pub struct RayTracingPipeline {}
+
+impl crate::DynRayTracingPipeline for RayTracingPipeline {}
+
+#[derive(Debug)]
 pub struct PipelineCache;
 
 impl crate::DynPipelineCache for PipelineCache {}
@@ -1424,6 +1339,24 @@ impl SwapChain {
             }
         } else {
             Ok(true)
+        }
+    }
+}
+
+fn map_surface_color_space(
+    color_space: wgt::SurfaceColorSpace,
+) -> Dxgi::Common::DXGI_COLOR_SPACE_TYPE {
+    use wgt::SurfaceColorSpace as Scs;
+    match color_space {
+        Scs::Srgb => Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+        Scs::ExtendedSrgbLinear => Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+        Scs::Bt2100Pq => Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+        Scs::Auto
+        | Scs::DisplayP3
+        | Scs::Bt2100Hlg
+        | Scs::ExtendedSrgb
+        | Scs::ExtendedDisplayP3 => {
+            unreachable!("`{color_space:?}` is never reported in the DX12 surface capabilities")
         }
     }
 }
@@ -1602,6 +1535,23 @@ impl crate::Surface for Surface {
                 })?
             }
         };
+
+        // Apply the color space unconditionally (even for sRGB) so that
+        // reconfiguring away from HDR10 resets the swapchain's state.
+        //
+        // We deliberately skip `CheckColorSpaceSupport`: a color space reporting as
+        // unsupported is not a failure. Windows composites in scRGB and tone-maps
+        // the color space down to the output, so `SetColorSpace1` still presents
+        // correctly even when the check returns false (as the MS docs note). This
+        // lets an app configure e.g. BT.2100 PQ on an SDR output and let the
+        // compositor map it.
+        let color_space = map_surface_color_space(config.color_space);
+        // SAFETY: `swap_chain` is a live `IDXGISwapChain3`; `color_space` is a
+        // valid `DXGI_COLOR_SPACE_TYPE`.
+        unsafe { swap_chain.SetColorSpace1(color_space) }.map_err(|err| {
+            log::error!("SetColorSpace1 failed: {err}");
+            crate::SurfaceError::Other("IDXGISwapChain3::SetColorSpace1")
+        })?;
 
         match self.target {
             SurfaceTarget::WndHandle(wnd_handle) => {
@@ -1828,7 +1778,7 @@ pub enum ShaderModuleSource {
     HlslPassthrough(HlslPassthroughShader),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FeatureLevel {
     V11_0,
     V11_1,
@@ -1837,7 +1787,7 @@ pub enum FeatureLevel {
     V12_2,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ShaderModel {
     V5_1,
     V6_0,

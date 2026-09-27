@@ -5,22 +5,25 @@ use {
         dso_debug::SectionDsoDebugError,
         maps_reader::MapsReaderError,
         minidump_writer::{
-            app_memory::SectionAppMemoryError, exception_stream::SectionExceptionStreamError,
+            exception_stream::SectionExceptionStreamError,
             handle_data_stream::SectionHandleDataStreamError, mappings::SectionMappingsError,
             memory_info_list_stream::SectionMemInfoListError,
             memory_list_stream::SectionMemListError, systeminfo_stream::SectionSystemInfoError,
             thread_list_stream::SectionThreadListError,
             thread_names_stream::SectionThreadNamesError,
         },
+        module_list::ModuleResolveError,
         module_reader::ModuleReaderError,
         process_inspection,
         serializers::*,
     },
-    crate::{dir_section::FileWriterError, mem_writer::MemoryWriterError, serializers::*},
+    crate::{
+        dir_section::FileWriterError, mem_writer::MemoryWriterError,
+        process_reader::CopyFromProcessError, serializers::*,
+    },
     error_graph::ErrorList,
-    nix::errno::Errno,
     procfs_core::ProcError,
-    std::ffi::OsString,
+    std::ffi::{OsString, c_int},
     thiserror::Error,
 };
 
@@ -32,7 +35,7 @@ pub enum WriterError {
     #[error("Error during init phase")]
     InitError(#[from] InitError),
     #[error("Failed when writing section AppMemory")]
-    SectionAppMemoryError(#[from] SectionAppMemoryError),
+    SectionAppMemoryError(#[source] CopyFromProcessError),
     #[error("Failed when writing section ExceptionStream")]
     SectionExceptionStreamError(#[from] SectionExceptionStreamError),
     #[error("Failed when writing section HandleDataStream")]
@@ -67,6 +70,10 @@ pub enum WriterError {
     ResumeThreadsErrors(#[source] ErrorList<WriterError>),
     #[error("Errors occurred while writing system info")]
     WriteSystemInfoErrors(#[source] ErrorList<SectionSystemInfoError>),
+    #[error("Errors occurred while writing the thread list")]
+    WriteThreadListErrors(#[source] ErrorList<SectionThreadListError>),
+    #[error("Errors occurred while writing the module list")]
+    WriteModuleListErrors(#[source] ErrorList<SectionMappingsError>),
     #[error("Failed writing cpuinfo")]
     WriteCpuInfoFailed(#[source] MemoryWriterError),
     #[error("Failed writing thread proc status")]
@@ -95,38 +102,12 @@ pub enum WriterError {
         #[serde(skip)]
         serde_json::Error,
     ),
-    #[error("nix::ptrace::attach(Pid={0}) failed")]
-    PtraceAttachError(
-        Pid,
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        nix::Error,
-    ),
-    #[error("nix::ptrace::detach(Pid={0}) failed")]
-    PtraceDetachError(
-        Pid,
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        nix::Error,
-    ),
-    #[error("wait::waitpid(Pid={0}) failed")]
-    WaitPidError(
-        Pid,
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        nix::Error,
-    ),
+    #[error("nix::ptrace::attach(Pid={0}) failed: {1}")]
+    PtraceAttachError(Pid, c_int),
     #[error("Skipped thread {0} due to it being part of the seccomp sandbox's trusted code")]
     DetachSkippedThread(Pid),
     #[error("Maps reader error")]
     MapsReaderError(#[from] MapsReaderError),
-    #[error("Failed to get PAGE_SIZE from system")]
-    SysConfError(
-        #[from]
-        #[serde(serialize_with = "serialize_nix_error")]
-        nix::Error,
-    ),
-
     #[error("No mapping for stack pointer found")]
     NoStackPointerMapping,
     #[error("Failed slice conversion")]
@@ -152,9 +133,9 @@ pub enum WriterError {
         std::num::TryFromIntError,
     ),
     #[error("failed to suspend thread")]
-    SuspendThreadFailed(#[source] process_inspection::SuspendResumeThreadError),
+    SuspendThreadFailed(#[source] process_inspection::Error),
     #[error("failed to resume thread")]
-    ResumeThreadFailed(#[source] process_inspection::SuspendResumeThreadError),
+    ResumeThreadFailed(#[source] process_inspection::Error),
 }
 
 #[derive(Debug, Error, serde::Serialize)]
@@ -162,20 +143,10 @@ pub enum InitError {
     #[error("failed to read auxv")]
     ReadAuxvFailed(#[source] super::super::auxv::AuxvError),
     #[error("IO error reading /proc/<pid>/task")]
-    ReadProcTaskFailed(
-        #[source]
-        #[serde(serialize_with = "serialize_io_error")]
-        std::io::Error,
-    ),
+    ReadProcTaskFailed(#[source] process_inspection::Error),
     #[cfg(target_os = "android")]
     #[error("Failed Android specific late init")]
     AndroidLateInitError(#[from] AndroidError),
-    #[error("Failed to read the page size")]
-    PageSizeError(
-        #[from]
-        #[serde(serialize_with = "serialize_nix_error")]
-        nix::Error,
-    ),
     #[error("Ptrace does not function within the same process")]
     CannotPtraceSameProcess,
     #[error("Failed to stop the target process")]
@@ -185,11 +156,7 @@ pub enum InitError {
     #[error("Failed filling missing Auxv info")]
     FillMissingAuxvInfoFailed(#[source] AuxvError),
     #[error("Failed reading proc/pid/task entry for process")]
-    ReadProcessThreadEntryFailed(
-        #[source]
-        #[serde(serialize_with = "serialize_io_error")]
-        std::io::Error,
-    ),
+    ReadProcessThreadEntryFailed(#[source] process_inspection::Error),
     #[error("Process task entry `{0:?}` could not be parsed as a TID")]
     ProcessTaskEntryNotTid(OsString),
     #[error("Failed to read thread name")]
@@ -208,6 +175,10 @@ pub enum InitError {
     AggregateMappingsFailed(#[source] MapsReaderError),
     #[error("Failed to enumerate process mappings")]
     EnumerateMappingsFailed(#[source] Box<InitError>),
+    #[error("Failed to enumerate the process' loaded modules")]
+    EnumerateModulesFailed(#[source] Box<InitError>),
+    #[error("Errors occurred while resolving the module list")]
+    ResolveModuleListErrors(#[source] ErrorList<ModuleResolveError>),
     #[error("Errors occurred while suspending threads")]
     SuspendThreadsErrors(#[source] ErrorList<WriterError>),
     #[error("No threads left to suspend out of {0}")]
@@ -219,17 +190,9 @@ pub enum InitError {
 #[derive(Debug, thiserror::Error, serde::Serialize)]
 pub enum StopProcessError {
     #[error("Failed to stop the process")]
-    Stop(
-        #[from]
-        #[serde(serialize_with = "serialize_nix_error")]
-        nix::Error,
-    ),
+    Stop(#[source] process_inspection::Error),
     #[error("failed to open process file")]
-    ReadFileFailed(
-        #[source]
-        #[serde(serialize_with = "serialize_io_error")]
-        std::io::Error,
-    ),
+    ReadFileFailed(#[source] process_inspection::Error),
     #[error("Failed to get the process state")]
     State(
         #[from]
@@ -242,4 +205,4 @@ pub enum StopProcessError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("Failed to continue the process")]
-pub struct ContinueProcessError(#[source] pub Errno);
+pub struct ContinueProcessError(#[source] pub process_inspection::Error);

@@ -31,7 +31,7 @@ mod quantity;
 mod rate;
 mod recorded_experiment;
 mod remote_settings_config;
-mod string;
+pub(crate) mod string;
 mod string_list;
 mod text;
 mod time_unit;
@@ -41,7 +41,7 @@ mod url;
 mod uuid;
 
 use crate::common_metric_data::CommonMetricDataInternal;
-pub use crate::common_metric_data::DynamicLabelType;
+pub use crate::common_metric_data::MetricLabel;
 pub use crate::event_database::RecordedEvent;
 use crate::histogram::{Functional, Histogram, PrecomputedExponential, PrecomputedLinear};
 pub use crate::metrics::datetime::Datetime;
@@ -196,7 +196,7 @@ pub trait MetricType {
     }
 
     /// Create a new metric from this with a specific label.
-    fn with_dynamic_label(&self, _label: DynamicLabelType) -> Self
+    fn with_label(&self, _label: MetricLabel) -> Self
     where
         Self: Sized,
     {
@@ -214,6 +214,28 @@ pub trait MetricType {
         // This means we could write the wrong remote_settings_epoch | current_disabled value. All in all
         // at worst we would see that metric enabled/disabled wrongly once.
         // But since everything is tunneled through the dispatcher, this should never ever happen.
+
+        /*
+        Session sampling gate: suppress in-session telemetry for sampled-out sessions.
+
+        This check applies to ALL metric types, not just events because the `in_session` property
+        is shared through CommonMetricData. We might want to add session metadata to non-event
+        metrics in the future, and if we do, they should be suppressed by session sampling just
+        like events are.
+
+        In-session metrics (`in_session = true`) are suppressed here when the active session is
+        sampled out.
+
+        Out-of-session metrics (`in_session = false`) bypass this gate entirely and always record.
+
+        EventMetric additionally uses `compute_event_context()` after this check to determine
+        which session metadata to attach — that function is purely about metadata, not suppression,
+        and it may be called from other metric types in future if they also need per-event session
+        context.
+        */
+        if self.meta().in_session() && !glean.session_manager().is_sampled_in() {
+            return false;
+        }
 
         // Get the current disabled field from the metric metadata, including
         // the encoded remote_settings epoch
@@ -233,17 +255,13 @@ pub trait MetricType {
         let remote_settings_config = &glean.remote_settings_config.lock().unwrap();
         // Get the value from the remote configuration if it is there, otherwise return the default value.
         let current_disabled = {
-            let base_id = self.meta().base_identifier();
-            let identifier = base_id
-                .split_once('/')
-                .map(|split| split.0)
-                .unwrap_or(&base_id);
+            let identifier = self.meta().base_identifier();
             // NOTE: The `!` preceding the `*is_enabled` is important for inverting the logic since the
             // underlying property in the metrics.yaml is `disabled` and the outward API is treating it as
             // if it were `enabled` to make it easier to understand.
 
             if !remote_settings_config.metrics_enabled.is_empty() {
-                if let Some(is_enabled) = remote_settings_config.metrics_enabled.get(identifier) {
+                if let Some(is_enabled) = remote_settings_config.metrics_enabled.get(&identifier) {
                     u8::from(!*is_enabled)
                 } else {
                     u8::from(self.meta().inner.disabled)
@@ -266,7 +284,7 @@ pub trait MetricType {
 /// identifier (category, name, label) for a metric
 pub trait MetricIdentifier<'a> {
     /// Retrieve the category, name and (maybe) label of the metric
-    fn get_identifiers(&'a self) -> (&'a str, &'a str, Option<&'a str>);
+    fn get_identifiers(&'a self) -> (&'a str, &'a str, Option<String>);
 }
 
 /// [`TestGetValue`] describes an interface for retrieving the value for a given metric
@@ -297,9 +315,13 @@ impl<'a, T> MetricIdentifier<'a> for T
 where
     T: MetricType,
 {
-    fn get_identifiers(&'a self) -> (&'a str, &'a str, Option<&'a str>) {
+    fn get_identifiers(&'a self) -> (&'a str, &'a str, Option<String>) {
         let meta = &self.meta().inner;
-        (&meta.category, &meta.name, meta.dynamic_label.as_deref())
+        (
+            &meta.category,
+            &meta.name,
+            meta.label.as_ref().map(|label| label.to_string()),
+        )
     }
 }
 

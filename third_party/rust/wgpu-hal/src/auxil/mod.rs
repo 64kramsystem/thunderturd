@@ -1,5 +1,11 @@
-#[cfg(dx12)]
+// Mostly DX12-only, but also compiled for Vulkan-on-Windows, which reuses
+// `dxgi::hdr` to query display HDR info. The DX12-only submodules stay gated
+// behind `dx12` in `dxgi/mod.rs`.
+#[cfg(any(dx12, all(vulkan, windows)))]
 pub(super) mod dxgi;
+
+#[cfg(any(dx12, all(vulkan, windows)))]
+pub(super) mod dyn_lib;
 
 #[cfg(all(native, feature = "renderdoc"))]
 pub(super) mod renderdoc;
@@ -160,6 +166,32 @@ pub(crate) fn adjust_raw_limits(mut limits: wgt::Limits) -> wgt::Limits {
         ],
         max_per_stage_resources,
     );
+    // TODO: Remove this when compat mode is implemented, see
+    // <https://github.com/gfx-rs/wgpu/issues/8124>.
+    for (per_shader_stage, in_stage) in [
+        (
+            limits.max_storage_buffers_per_shader_stage,
+            [
+                &mut limits.max_storage_buffers_in_vertex_stage,
+                &mut limits.max_storage_buffers_in_fragment_stage,
+            ],
+        ),
+        (
+            limits.max_storage_textures_per_shader_stage,
+            [
+                &mut limits.max_storage_textures_in_vertex_stage,
+                &mut limits.max_storage_textures_in_fragment_stage,
+            ],
+        ),
+    ] {
+        for stage in in_stage {
+            assert_eq!(
+                *stage, 0,
+                "`max_storage_*_in_*_stage` limits must be 0 from HAL (for now)"
+            );
+            *stage = per_shader_stage;
+        }
+    }
 
     // Not required by the spec but dynamic buffers count
     // towards non-dynamic buffer limits as well.

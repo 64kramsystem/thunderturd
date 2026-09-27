@@ -1,8 +1,7 @@
 use alloc::{borrow::ToOwned as _, format, string::String, sync::Arc, vec, vec::Vec};
-use core::sync::atomic::AtomicU8;
 
 use glow::HasContext;
-use parking_lot::Mutex;
+use wgpu_sync::{atomic::AtomicU8, Mutex};
 use wgt::AstcChannel;
 
 use crate::auxil::db;
@@ -439,11 +438,53 @@ impl super::Adapter {
             wgt::DownlevelFlags::MULTISAMPLED_SHADING,
             supported((3, 2), (4, 0)) || extensions.contains("OES_sample_variables"),
         );
+        // GLSL ES has no `noperspective` qualifier, so `@interpolate(linear)` is only
+        // expressible on desktop GLSL (where we require at least 330, well past the 130
+        // that introduced `noperspective`).
+        downlevel_flags.set(
+            wgt::DownlevelFlags::LINEAR_INTERPOLATION,
+            !shading_language_version.is_es(),
+        );
         let query_buffers = extensions.contains("GL_ARB_query_buffer_object")
             || extensions.contains("GL_AMD_query_buffer_object");
         if query_buffers {
             downlevel_flags.set(wgt::DownlevelFlags::NONBLOCKING_QUERY_RESOLVE, true);
         }
+
+        // Desktop GL: norm16 is core since GL 3.0/3.1; we minimum-version
+        // to GL 3.3, so always on. GLES/WebGL2: needs `EXT_texture_norm16`.
+        let supports_16bit_norm = if es_ver.is_some() {
+            extensions.contains("GL_EXT_texture_norm16")
+                || extensions.contains("EXT_texture_norm16")
+        } else {
+            true
+        };
+        // SNORM color-rendering is not spec-guaranteed on either path
+        // (GLES Table 8.13 marks it not-renderable; desktop GL exposes
+        // it as only "optionally renderable"), so gate it on
+        // `EXT_render_snorm` for both - matching how `COLOR_BUFFER_FLOAT`
+        // is probed above.
+        let supports_16bit_snorm_renderable = supports_16bit_norm
+            && (extensions.contains("GL_EXT_render_snorm")
+                || extensions.contains("EXT_render_snorm"));
+        // Storage on norm16. ARB_shader_image_load_store / GL 4.2 Table X.2 and
+        // NV_image_formats Table 8.27 both list `r16/rg16/rgba16` and the SNORM
+        // variants as image-unit formats, so one gate covers UNORM and SNORM.
+        // Paths:
+        //   * Desktop:  core in GL 4.2+; on 3.3..=4.1 via `GL_ARB_shader_image_load_store`.
+        //   * GLES/WebGL2: only via `GL_NV_image_formats` - the ES 3.1/3.2 core
+        //     Table 8.27 omits these formats, and `GL_EXT_texture_norm16` does not
+        //     extend Table 8.27 (NV_image_formats itself depends on EXT_texture_norm16
+        //     for the norm16 entries, so an ES driver exposing NV_image_formats
+        //     without EXT_texture_norm16 still wouldn't accept them - the
+        //     `supports_16bit_norm` prerequisite below catches that).
+        let supports_16bit_norm_storage = supports_16bit_norm
+            && if es_ver.is_some() {
+                extensions.contains("GL_NV_image_formats")
+            } else {
+                full_ver.is_some_and(|v| v >= (4, 2))
+                    || extensions.contains("GL_ARB_shader_image_load_store")
+            };
 
         let mut features = wgt::Features::empty()
             | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
@@ -451,6 +492,10 @@ impl super::Adapter {
             | wgt::Features::IMMEDIATES
             | wgt::Features::DEPTH32FLOAT_STENCIL8
             | wgt::Features::PASSTHROUGH_SHADERS;
+        features.set(
+            wgt::Features::TEXTURE_FORMAT_16BIT_NORM,
+            supports_16bit_norm,
+        );
         features.set(
             wgt::Features::ADDRESS_MODE_CLAMP_TO_BORDER | wgt::Features::ADDRESS_MODE_CLAMP_TO_ZERO,
             extensions.contains("GL_EXT_texture_border_clamp")
@@ -675,6 +720,18 @@ impl super::Adapter {
             super::PrivateCapabilities::MULTISAMPLED_RENDER_TO_TEXTURE,
             extensions.contains("GL_EXT_multisampled_render_to_texture"),
         );
+        private_caps.set(
+            super::PrivateCapabilities::TEXTURE_FORMAT_NORM16,
+            supports_16bit_norm,
+        );
+        private_caps.set(
+            super::PrivateCapabilities::TEXTURE_FORMAT_SNORM16_RENDERABLE,
+            supports_16bit_snorm_renderable,
+        );
+        private_caps.set(
+            super::PrivateCapabilities::TEXTURE_FORMAT_NORM16_STORAGE,
+            supports_16bit_norm_storage,
+        );
 
         // GLSL ES 3.10+ / GLSL 4.30+ natively support coherent/volatile qualifiers
         // on storage buffers. These were introduced alongside storage buffer support.
@@ -733,7 +790,11 @@ impl super::Adapter {
             max_sampled_textures_per_shader_stage: super::MAX_TEXTURE_SLOTS as u32,
             max_samplers_per_shader_stage: super::MAX_SAMPLERS as u32,
             max_storage_buffers_per_shader_stage,
+            max_storage_buffers_in_vertex_stage: 0,
+            max_storage_buffers_in_fragment_stage: 0,
             max_storage_textures_per_shader_stage,
+            max_storage_textures_in_vertex_stage: 0,
+            max_storage_textures_in_fragment_stage: 0,
             max_uniform_buffers_per_shader_stage,
             max_binding_array_elements_per_shader_stage: 0,
             max_binding_array_sampler_elements_per_shader_stage: 0,
@@ -853,8 +914,12 @@ impl super::Adapter {
             max_blas_geometry_count: 0,
             max_tlas_instance_count: 0,
             max_acceleration_structures_per_shader_stage: 0,
+            max_buffers_and_acceleration_structures_per_shader_stage: u32::MAX,
 
             max_multiview_view_count: 0,
+
+            max_ray_dispatch_count: 0,
+            max_ray_recursion_depth: 0,
         });
 
         let mut workarounds = super::Workarounds::empty();
@@ -886,7 +951,7 @@ impl super::Adapter {
         // Drop the GL guard so we can move the context into AdapterShared
         // ( on Wasm the gl handle is just a ref so we tell clippy to allow
         // dropping the ref )
-        #[cfg_attr(target_arch = "wasm32", allow(dropping_references))]
+        #[cfg_attr(target_family = "wasm", allow(dropping_references))]
         drop(gl);
 
         Some(crate::ExposedAdapter {
@@ -929,6 +994,9 @@ impl super::Adapter {
                     uniform_bounds_check_alignment: wgt::BufferSize::new(1).unwrap(),
                     raw_tlas_instance_size: 0,
                     ray_tracing_scratch_buffer_alignment: 0,
+                    ray_tracing_pipeline_group_data_size: 0,
+                    ray_tracing_pipeline_group_data_alignment: 0,
+                    ray_tracing_pipeline_data_offset_alignment: 0,
                 },
                 cooperative_matrix_properties: Vec::new(),
             },
@@ -1160,6 +1228,31 @@ impl crate::Adapter for super::Adapter {
         let image_atomic = feature_fn(wgt::Features::TEXTURE_ATOMIC, Tfc::STORAGE_ATOMIC);
         let image_64_atomic = feature_fn(wgt::Features::TEXTURE_INT64_ATOMIC, Tfc::STORAGE_ATOMIC);
 
+        // UNORM gets full filterable+renderable; SNORM splits because
+        // `EXT_texture_norm16` marks only UNORM as color-renderable.
+        // Storage rides on a separate cap (desktop GL >= 4.2 core / pre-4.2
+        // `GL_ARB_shader_image_load_store`, GLES `GL_NV_image_formats`).
+        let norm16_unorm = private_caps_fn(
+            super::PrivateCapabilities::TEXTURE_FORMAT_NORM16,
+            filterable_renderable,
+        );
+        let norm16_snorm = if self
+            .shared
+            .private_caps
+            .contains(super::PrivateCapabilities::TEXTURE_FORMAT_SNORM16_RENDERABLE)
+        {
+            norm16_unorm
+        } else {
+            private_caps_fn(
+                super::PrivateCapabilities::TEXTURE_FORMAT_NORM16,
+                filterable,
+            )
+        };
+        let norm16_storage = private_caps_fn(
+            super::PrivateCapabilities::TEXTURE_FORMAT_NORM16_STORAGE,
+            storage,
+        );
+
         match format {
             Tf::R8Unorm => filterable_renderable,
             Tf::R8Snorm => filterable,
@@ -1167,8 +1260,8 @@ impl crate::Adapter for super::Adapter {
             Tf::R8Sint => renderable,
             Tf::R16Uint => renderable,
             Tf::R16Sint => renderable,
-            Tf::R16Unorm => empty,
-            Tf::R16Snorm => empty,
+            Tf::R16Unorm => norm16_unorm | norm16_storage,
+            Tf::R16Snorm => norm16_snorm | norm16_storage,
             Tf::R16Float => filterable | half_float_renderable,
             Tf::Rg8Unorm => filterable_renderable,
             Tf::Rg8Snorm => filterable,
@@ -1179,8 +1272,8 @@ impl crate::Adapter for super::Adapter {
             Tf::R32Float => unfilterable | storage | float_renderable | texture_float_linear,
             Tf::Rg16Uint => renderable,
             Tf::Rg16Sint => renderable,
-            Tf::Rg16Unorm => empty,
-            Tf::Rg16Snorm => empty,
+            Tf::Rg16Unorm => norm16_unorm | norm16_storage,
+            Tf::Rg16Snorm => norm16_snorm | norm16_storage,
             Tf::Rg16Float => filterable | half_float_renderable,
             Tf::Rgba8Unorm => filterable_renderable | storage,
             Tf::Rgba8UnormSrgb => filterable_renderable,
@@ -1197,8 +1290,8 @@ impl crate::Adapter for super::Adapter {
             Tf::Rg32Float => unfilterable | float_renderable | texture_float_linear,
             Tf::Rgba16Uint => renderable | storage,
             Tf::Rgba16Sint => renderable | storage,
-            Tf::Rgba16Unorm => empty,
-            Tf::Rgba16Snorm => empty,
+            Tf::Rgba16Unorm => norm16_unorm | norm16_storage,
+            Tf::Rgba16Snorm => norm16_snorm | norm16_storage,
             Tf::Rgba16Float => filterable | storage | half_float_renderable,
             Tf::Rgba32Uint => renderable | storage,
             Tf::Rgba32Sint => renderable | storage,
@@ -1257,16 +1350,22 @@ impl crate::Adapter for super::Adapter {
         }
 
         if surface.presentable {
+            // There is no extended-range or wide-gamut path in the GLES
+            // backend; everything is presented as sRGB.
+            let format_caps = |format: wgt::TextureFormat| wgt::SurfaceFormatCapabilities {
+                format,
+                color_spaces: wgt::SurfaceColorSpaces::SRGB,
+            };
             let mut formats = vec![
-                wgt::TextureFormat::Rgba8Unorm,
+                format_caps(wgt::TextureFormat::Rgba8Unorm),
                 #[cfg(native)]
-                wgt::TextureFormat::Bgra8Unorm,
+                format_caps(wgt::TextureFormat::Bgra8Unorm),
             ];
             if surface.supports_srgb() {
                 formats.extend([
-                    wgt::TextureFormat::Rgba8UnormSrgb,
+                    format_caps(wgt::TextureFormat::Rgba8UnormSrgb),
                     #[cfg(native)]
-                    wgt::TextureFormat::Bgra8UnormSrgb,
+                    format_caps(wgt::TextureFormat::Bgra8UnormSrgb),
                 ])
             }
             if self
@@ -1274,7 +1373,7 @@ impl crate::Adapter for super::Adapter {
                 .private_caps
                 .contains(super::PrivateCapabilities::COLOR_BUFFER_HALF_FLOAT)
             {
-                formats.push(wgt::TextureFormat::Rgba16Float)
+                formats.push(format_caps(wgt::TextureFormat::Rgba16Float))
             }
 
             Some(crate::SurfaceCapabilities {
@@ -1306,7 +1405,8 @@ impl crate::Adapter for super::Adapter {
     fn get_ordered_texture_usages(&self) -> wgt::TextureUses {
         wgt::TextureUses::INCLUSIVE
             | wgt::TextureUses::COLOR_TARGET
-            | wgt::TextureUses::DEPTH_STENCIL_WRITE
+            | wgt::TextureUses::DEPTH_WRITE
+            | wgt::TextureUses::STENCIL_WRITE
     }
 }
 

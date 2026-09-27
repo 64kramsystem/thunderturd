@@ -76,8 +76,7 @@ pub use self::{
     util::*,
 };
 
-mod min_version;
-use min_version::MINIMUM_NSS_VERSION;
+const MINIMUM_NSS_VERSION: &str = env!("NSS_MIN_VERSION");
 
 pub mod nss_prelude {
     #![allow(
@@ -141,6 +140,9 @@ fn init_once(db: Option<PathBuf>) -> Res<NssLoaded> {
     // Set time zero.
     time::init();
     version_check()?;
+    #[cfg(all(not(feature = "disable-encryption"), feature = "blapi"))]
+    freebl::init()?;
+
     if unsafe { nss::NSS_IsInitialized() != 0 } {
         return Ok(NssLoaded::External);
     }

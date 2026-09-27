@@ -41,6 +41,7 @@ pub use glean_core::{
     },
     traits, AttributionMetrics, CommonMetricData, DistributionMetrics, Error, ErrorType, Glean,
     HistogramType, LabeledMetricData, Lifetime, PingRateLimit, RecordedExperiment, Result,
+    SessionMode, SubmittedPing,
 };
 
 mod configuration;
@@ -129,6 +130,13 @@ fn initialize_internal(cfg: Configuration, client_info: ClientInfoMetrics) -> Op
         ping_schedule: cfg.ping_schedule,
         ping_lifetime_threshold: cfg.ping_lifetime_threshold as u64,
         ping_lifetime_max_time: cfg.ping_lifetime_max_time.as_millis() as u64,
+        max_pending_pings_count: None,
+        max_pending_pings_directory_size: None,
+        session_mode: cfg.session_mode,
+        session_sample_rate: cfg.session_sample_rate,
+        session_inactivity_timeout_ms: cfg.session_inactivity_timeout.as_millis() as u64,
+        events_ping_acceleration_factor: cfg.events_ping_acceleration_factor.map(|x| x as u32),
+        enable_store_submitted_pings: cfg.enable_store_submitted_pings,
     };
 
     glean_core::glean_initialize(core_cfg, client_info.into(), callbacks);
@@ -138,6 +146,22 @@ fn initialize_internal(cfg: Configuration, client_info: ClientInfoMetrics) -> Op
 /// Shuts down Glean in an orderly fashion.
 pub fn shutdown() {
     glean_core::shutdown()
+}
+
+/// Starts a session manually (MANUAL mode only).
+///
+/// In `SessionMode::Manual`, the application is responsible for calling
+/// `session_start` and `session_end` to manage session boundaries.
+pub fn session_start() {
+    glean_core::glean_session_start();
+}
+
+/// Ends a session manually (MANUAL mode only).
+///
+/// `reason` is an optional application-provided string attached to the
+/// `glean.session_end` boundary event for downstream analysis.
+pub fn session_end(reason: Option<String>) {
+    glean_core::glean_session_end(reason);
 }
 
 /// **DEPRECATED** Sets whether upload is enabled or not.
@@ -155,6 +179,32 @@ pub fn set_upload_enabled(enabled: bool) {
 /// See [`glean_core::Glean::set_upload_enabled`].
 pub fn set_collection_enabled(enabled: bool) {
     glean_core::glean_set_collection_enabled(enabled)
+}
+
+/// Sets whether storing submitted pings is enabled or not.
+pub fn set_store_submitted_pings_enabled(enabled: bool) {
+    glean_core::glean_set_store_submitted_pings_enabled(enabled)
+}
+
+/// Returns all stored submitted pings.
+///
+/// Requires storing submitted pings to be enabled.
+/// See [`set_store_submitted_pings_enabled`].
+pub fn get_all_stored_submitted_pings() -> Vec<glean_core::SubmittedPing> {
+    glean_core::glean_get_all_stored_submitted_pings()
+}
+
+/// Returns all stored submitted pings with a given ping name.
+///
+/// Requires storing submitted pings to be enabled.
+/// See [`set_store_submitted_pings_enabled`].
+pub fn get_stored_submitted_pings_by_name(ping: String) -> Vec<glean_core::SubmittedPing> {
+    glean_core::glean_get_stored_submitted_pings_by_name(ping)
+}
+
+/// Clears all stored submitted pings.
+pub fn clear_stored_submitted_pings() {
+    glean_core::glean_clear_stored_submitted_pings()
 }
 
 /// Collects and submits a ping for eventual uploading by name.
@@ -356,6 +406,12 @@ pub fn get_registered_ping_names() -> Vec<String> {
     glean_core::glean_get_registered_ping_names()
 }
 
+/// Clears the core attribution data.
+/// Does not clear glean.attribution.ext (if present).
+pub fn clear_attribution() {
+    glean_core::glean_clear_attribution();
+}
+
 /// Updates attribution fields with new values.
 /// AttributionMetrics fields with `None` values will not overwrite older values.
 pub fn update_attribution(attribution: AttributionMetrics) {
@@ -367,6 +423,12 @@ pub fn update_attribution(attribution: AttributionMetrics) {
 /// Returns the current attribution metrics.
 pub fn test_get_attribution() -> AttributionMetrics {
     glean_core::glean_test_get_attribution()
+}
+
+/// Clears the core distribution data.
+/// Does not clear glean.distribution.ext (if present).
+pub fn clear_distribution() {
+    glean_core::glean_clear_distribution();
 }
 
 /// Updates distribution fields with new values.

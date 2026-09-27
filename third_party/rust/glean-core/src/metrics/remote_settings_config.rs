@@ -40,6 +40,17 @@ pub struct RemoteSettingsConfig {
     /// It overrides the value configured at initialization time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_threshold: Option<u32>,
+
+    /// Remote override for the session sampling rate (0.0–1.0).
+    /// When set, this overrides the value configured at initialization time.
+    /// Changes take effect at the next session start.
+    #[serde(default)]
+    pub session_sample_rate: Option<f64>,
+
+    /// The number of "events" pings to accelerate each session, plus one.
+    /// It overrides the value configured at initialization time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_ping_acceleration_factor: Option<usize>,
 }
 
 impl RemoteSettingsConfig {

@@ -98,6 +98,7 @@ Device <- CommandBuffer = insert(device.start, device.end, buffer.start, buffer.
 mod blas;
 mod buffer;
 mod metadata;
+mod query_set;
 mod range;
 mod stateless;
 mod texture;
@@ -117,6 +118,7 @@ use core::{fmt, mem, ops};
 
 use thiserror::Error;
 
+pub(crate) use crate::track::query_set::QuerySetTracker;
 pub(crate) use buffer::{
     BufferBindGroupState, BufferTracker, BufferUsageScope, DeviceBufferTracker,
 };
@@ -306,6 +308,7 @@ impl PendingTransition<wgt::TextureUses> {
                 array_layer_count: Some(layer_count),
             },
             usage: self.usage,
+            queue_family_ownership_transfer: None,
         }
     }
 }
@@ -321,17 +324,16 @@ pub(crate) trait ResourceUses:
     type Selector: fmt::Debug;
 
     /// Turn the resource into a pile of bits.
-    fn bits(self) -> u16;
+    fn bits(self) -> u32;
     /// Returns true if any of the uses are exclusive.
     fn any_exclusive(self) -> bool;
-}
 
-/// Returns true if the given states violates the usage scope rule
-/// of any(inclusive) XOR one(exclusive)
-fn invalid_resource_state<T: ResourceUses>(state: T) -> bool {
-    // Is power of two also means "is one bit set". We check for this as if
-    // we're in any exclusive state, we must only be in a single state.
-    state.any_exclusive() && !state.bits().is_power_of_two()
+    /// Returns true if the given states violates the usage scope rule
+    /// of any(inclusive) XOR one(exclusive)
+    fn is_invalid(self) -> bool {
+        // If we're in any exclusive state, we must only be in a single state.
+        self.any_exclusive() && self.bits().count_ones() != 1
+    }
 }
 
 /// Returns true if the transition from one state to another does not require
@@ -647,7 +649,7 @@ pub(crate) struct Tracker {
     pub compute_pipelines: StatelessTracker<pipeline::ComputePipeline>,
     pub render_pipelines: StatelessTracker<pipeline::RenderPipeline>,
     pub bundles: StatelessTracker<command::RenderBundle>,
-    pub query_sets: StatelessTracker<resource::QuerySet>,
+    pub query_sets: QuerySetTracker,
 }
 
 impl Tracker {
@@ -665,7 +667,7 @@ impl Tracker {
             compute_pipelines: StatelessTracker::new(),
             render_pipelines: StatelessTracker::new(),
             bundles: StatelessTracker::new(),
-            query_sets: StatelessTracker::new(),
+            query_sets: QuerySetTracker::new(),
         }
     }
 

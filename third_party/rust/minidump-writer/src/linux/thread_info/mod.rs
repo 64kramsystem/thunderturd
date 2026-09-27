@@ -1,8 +1,7 @@
 use {
     super::{
         Pid,
-        process_inspection::{ProcessInspector, regs},
-        serializers::*,
+        process_inspection::{self, ProcessInspector, regs},
     },
     crate::serializers::*,
     std::{
@@ -19,6 +18,8 @@ pub enum ThreadInfoError {
     IndexOutOfBounds(usize, usize),
     #[error("Either ppid ({1}) or tgid ({2}) not found in {0}")]
     InvalidPid(String, Pid, Pid),
+    #[error("failed reading /proc/<tid>/status")]
+    ReadFileFailed(#[source] process_inspection::Error),
     #[error("IO error")]
     IOError(
         #[from]
@@ -31,12 +32,14 @@ pub enum ThreadInfoError {
         #[serde(skip)]
         std::num::ParseIntError,
     ),
-    #[error("nix::ptrace() error")]
-    PtraceError(
-        #[source]
-        #[serde(serialize_with = "serialize_nix_error")]
-        nix::Error,
-    ),
+    #[error("failed to get general-purpose registers")]
+    GetGenRegsFailed(#[source] process_inspection::Error),
+    #[error("failed to get floating-point registers")]
+    GetFpRegsFailed(#[source] process_inspection::Error),
+    #[error("failed to get floating-point register extended info")]
+    GetFpxRegsFailed(#[source] process_inspection::Error),
+    #[error("failed to get debug registers")]
+    GetDebugRegsFailed(#[source] process_inspection::Error),
     #[error("Invalid line in /proc/{0}/status: {1}")]
     InvalidProcStatusFile(Pid, String),
 }
@@ -57,12 +60,14 @@ cfg_if::cfg_if! {
     }
 }
 
-fn get_ppid_and_tgid(process_inspector: &ProcessInspector, tid: Pid) -> Result<(Pid, Pid)> {
+fn get_ppid_and_tgid(process_inspector: &dyn ProcessInspector, tid: Pid) -> Result<(Pid, Pid)> {
     let mut ppid = -1;
     let mut tgid = -1;
 
     let status_path = path::PathBuf::from(format!("/proc/{tid}/status"));
-    let status_file = process_inspector.read_file(status_path)?;
+    let status_file = process_inspector
+        .read_file(status_path)
+        .map_err(ThreadInfoError::ReadFileFailed)?;
     for line in io::BufReader::new(status_file).lines() {
         let l = line?;
         let start = l

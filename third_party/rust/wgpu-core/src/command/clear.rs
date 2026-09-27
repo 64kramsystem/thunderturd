@@ -1,18 +1,16 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::ops::Range;
 
 use crate::{
     api_log,
     command::{encoder::EncodingState, ArcCommand, EncoderStateError},
     device::{DeviceError, MissingFeatures},
-    get_lowest_common_denom,
-    global::Global,
-    hal_label,
-    id::{BufferId, CommandEncoderId, TextureId},
+    get_lowest_common_denom, hal_label,
     init_tracker::{MemoryInitKind, TextureInitRange},
     resource::{
-        Buffer, DestroyedResourceError, InvalidResourceError, Labeled, MissingBufferUsageError,
-        ParentDevice, RawResourceAccess, ResourceErrorIdent, Texture, TextureClearMode,
+        Buffer, DestroyedResourceError, InvalidOrDestroyedResourceError, InvalidResourceError,
+        Labeled, MissingBufferUsageError, ParentDevice, RawResourceAccess, ResourceErrorIdent,
+        Texture, TextureClearMode,
     },
     snatch::SnatchGuard,
     track::TextureTrackerSetSingle,
@@ -79,6 +77,15 @@ whereas subesource range specified start {subresource_base_array_layer} and coun
     InvalidResource(#[from] InvalidResourceError),
 }
 
+impl From<InvalidOrDestroyedResourceError> for ClearError {
+    fn from(value: InvalidOrDestroyedResourceError) -> Self {
+        match value {
+            InvalidOrDestroyedResourceError::InvalidResource(e) => Self::InvalidResource(e),
+            InvalidOrDestroyedResourceError::DestroyedResource(e) => Self::DestroyedResource(e),
+        }
+    }
+}
+
 impl WebGpuError for ClearError {
     fn webgpu_error_type(&self) -> ErrorType {
         match self {
@@ -100,51 +107,64 @@ impl WebGpuError for ClearError {
     }
 }
 
-impl Global {
-    pub fn command_encoder_clear_buffer(
-        &self,
-        command_encoder_id: CommandEncoderId,
-        dst: BufferId,
+impl super::CommandEncoder {
+    fn clear_buffer_inner(
+        self: &Arc<Self>,
+        dst: Arc<Buffer>,
         offset: BufferAddress,
         size: Option<BufferAddress>,
     ) -> Result<(), EncoderStateError> {
         profiling::scope!("CommandEncoder::clear_buffer");
-        api_log!("CommandEncoder::clear_buffer {dst:?}");
+        api_log!("CommandEncoder::clear_buffer {:?}", Arc::as_ptr(&dst));
 
-        let hub = &self.hub;
-
-        let cmd_enc = hub.command_encoders.get(command_encoder_id);
-        let mut cmd_buf_data = cmd_enc.data.lock();
+        let mut cmd_buf_data = self.data.lock();
 
         cmd_buf_data.push_with(|| -> Result<_, ClearError> {
-            Ok(ArcCommand::ClearBuffer {
-                dst: self.resolve_buffer_id(dst)?,
-                offset,
-                size,
+            dst.check_is_valid()?;
+            Ok(ArcCommand::ClearBuffer { dst, offset, size })
+        })
+    }
+
+    pub fn clear_buffer(
+        self: &Arc<Self>,
+        dst: Arc<Buffer>,
+        offset: BufferAddress,
+        size: Option<BufferAddress>,
+    ) {
+        if let Err(err) = self.clear_buffer_inner(dst, offset, size) {
+            self.device
+                .handle_error(err, Some(self.label()), "CommandEncoder::clear_buffer");
+        }
+    }
+
+    fn clear_texture_inner(
+        self: &Arc<Self>,
+        dst: Arc<Texture>,
+        subresource_range: &ImageSubresourceRange,
+    ) -> Result<(), EncoderStateError> {
+        profiling::scope!("CommandEncoder::clear_texture");
+        api_log!("CommandEncoder::clear_texture {:?}", Arc::as_ptr(&dst));
+
+        let mut cmd_buf_data = self.data.lock();
+
+        cmd_buf_data.push_with(|| -> Result<_, ClearError> {
+            dst.check_valid()?;
+            Ok(ArcCommand::ClearTexture {
+                dst,
+                subresource_range: *subresource_range,
             })
         })
     }
 
-    pub fn command_encoder_clear_texture(
-        &self,
-        command_encoder_id: CommandEncoderId,
-        dst: TextureId,
+    pub fn clear_texture(
+        self: &Arc<Self>,
+        dst: Arc<Texture>,
         subresource_range: &ImageSubresourceRange,
-    ) -> Result<(), EncoderStateError> {
-        profiling::scope!("CommandEncoder::clear_texture");
-        api_log!("CommandEncoder::clear_texture {dst:?}");
-
-        let hub = &self.hub;
-
-        let cmd_enc = hub.command_encoders.get(command_encoder_id);
-        let mut cmd_buf_data = cmd_enc.data.lock();
-
-        cmd_buf_data.push_with(|| -> Result<_, ClearError> {
-            Ok(ArcCommand::ClearTexture {
-                dst: self.resolve_texture_id(dst)?,
-                subresource_range: *subresource_range,
-            })
-        })
+    ) {
+        if let Err(err) = self.clear_texture_inner(dst, subresource_range) {
+            self.device
+                .handle_error(err, Some(self.label()), "CommandEncoder::clear_texture");
+        }
     }
 }
 
@@ -269,6 +289,7 @@ pub(super) fn clear_texture_cmd(
             mip_range: subresource_mip_range,
             layer_range: subresource_layer_range,
         },
+        None,
         state.raw_encoder,
         &mut state.tracker.textures,
         &state.device.alignments,
@@ -287,9 +308,15 @@ pub(super) fn clear_texture_cmd(
 /// [`clear_texture_cmd`], which does the validation. This function is also
 /// called directly from various places within wgpu that need to clear a
 /// texture.
+///
+/// For a 3D texture:
+/// - If `depth_slice` is `Some`, clear only that depth slice (in this case,
+///   `range.mip_range` must be a single mip level).
+/// - If `depth_slice` is `None`, clear entire mip level(s).
 pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
     dst_texture: &Arc<Texture>,
     range: TextureInitRange,
+    depth_slice: Option<u32>,
     encoder: &mut dyn hal::DynCommandEncoder,
     texture_tracker: &mut T,
     alignments: &hal::Alignments,
@@ -297,14 +324,14 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
     snatch_guard: &SnatchGuard<'_>,
     instance_flags: wgt::InstanceFlags,
 ) -> Result<(), ClearError> {
-    let dst_raw = dst_texture.try_raw(snatch_guard)?;
+    let dst_raw = dst_texture.try_inner(snatch_guard)?.raw();
 
     // Issue the right barrier.
     let clear_usage = match *dst_texture.clear_mode.read() {
         TextureClearMode::BufferCopy => wgt::TextureUses::COPY_DST,
         TextureClearMode::RenderPass {
             is_color: false, ..
-        } => wgt::TextureUses::DEPTH_STENCIL_WRITE,
+        } => wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::STENCIL_WRITE,
         TextureClearMode::Surface { .. } | TextureClearMode::RenderPass { is_color: true, .. } => {
             wgt::TextureUses::COLOR_TARGET
         }
@@ -349,6 +376,7 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
             alignments,
             zero_buffer,
             range,
+            depth_slice,
             encoder,
             dst_raw,
         ),
@@ -370,14 +398,25 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
 }
 
 fn clear_texture_via_buffer_copies(
-    texture_desc: &wgt::TextureDescriptor<(), Vec<wgt::TextureFormat>>,
+    texture_desc: &wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
     alignments: &hal::Alignments,
     zero_buffer: &dyn hal::DynBuffer, // Buffer of size device::ZERO_BUFFER_SIZE
     range: TextureInitRange,
+    depth_slice: Option<u32>,
     encoder: &mut dyn hal::DynCommandEncoder,
     dst_raw: &dyn hal::DynTexture,
 ) {
+    // These preconditions should apply to `clear_texture` as a whole, but since they're
+    // currently only serving this function, seems clearer to keep them here.
     assert!(!texture_desc.format.is_depth_stencil_format());
+    assert!(
+        depth_slice.is_none() || texture_desc.dimension == wgt::TextureDimension::D3,
+        "depth_slice is only applicable to 3D textures",
+    );
+    assert!(
+        depth_slice.is_none() || range.mip_range.len() == 1,
+        "must target a single depth slice when clearing a mip level",
+    );
 
     if texture_desc.format == wgt::TextureFormat::NV12
         || texture_desc.format == wgt::TextureFormat::P010
@@ -416,11 +455,13 @@ fn clear_texture_via_buffer_copies(
             texture_desc.size
         );
 
-        let z_range = 0..(if texture_desc.dimension == wgt::TextureDimension::D3 {
-            mip_size.depth_or_array_layers
+        let z_range = if let Some(depth_slice) = depth_slice {
+            depth_slice..depth_slice + 1
+        } else if texture_desc.dimension == wgt::TextureDimension::D3 {
+            0..mip_size.depth_or_array_layers
         } else {
-            1
-        });
+            0..1
+        };
 
         for array_layer in range.layer_range.clone() {
             // TODO: Only doing one layer at a time for volume textures right now.
@@ -514,11 +555,13 @@ fn clear_texture_via_render_passes(
                                 mip_level,
                                 depth_or_layer,
                             ),
-                            usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                            usage: wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::STENCIL_WRITE,
                         },
                         depth_ops: hal::AttachmentOps::STORE | hal::AttachmentOps::LOAD_CLEAR,
                         stencil_ops: hal::AttachmentOps::STORE | hal::AttachmentOps::LOAD_CLEAR,
                         clear_value: (0.0, 0),
+                        depth_read_only: false,
+                        stencil_read_only: false,
                     }),
                 )
             };

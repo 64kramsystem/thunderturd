@@ -5,16 +5,14 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use std::any::Any;
-
-use crate::{
-    image::{Image, ImageDataType},
-    render::{
-        RenderPipelineInOutStage, RenderPipelineInPlaceStage, RunInOutStage, RunInPlaceStage,
-        internal::PipelineBuffer,
-    },
-    util::{SmallVec, mirror, round_up_size_to_cache_line, tracing_wrappers::*},
+use crate::image::{Image, ImageDataType};
+use crate::render::internal::PipelineBuffer;
+use crate::render::{
+    ErasedLocalState, RenderPipelineInOutStage, RenderPipelineInPlaceStage, RunInOutStage,
+    RunInPlaceStage,
 };
+use crate::util::tracing_wrappers::*;
+use crate::util::{SmallVec, StackOnly, mirror, round_up_size_to_cache_line};
 
 impl PipelineBuffer for Image<f64> {
     type InPlaceExtraInfo = usize;
@@ -26,7 +24,7 @@ impl<T: RenderPipelineInPlaceStage> RunInPlaceStage<Image<f64>> for T {
         &self,
         chunk_size: usize,
         buffers: &mut [&mut Image<f64>],
-        mut state: Option<&mut dyn Any>,
+        mut state: Option<&mut ErasedLocalState>,
     ) {
         debug!("running inplace stage '{self}' in simple pipeline");
         let numc = buffers.len();
@@ -53,7 +51,7 @@ impl<T: RenderPipelineInPlaceStage> RunInPlaceStage<Image<f64>> for T {
                     }
                 }
                 let mut row: Vec<_> = buffer.iter_mut().map(|x| x as &mut [_]).collect();
-                self.process_row_chunk((x, y), xsize, &mut row, state.as_deref_mut());
+                self.process_row_chunk((x, y), xsize, &mut row, state.as_deref_mut(), false);
                 for c in 0..numc {
                     let out_row = buffers[c].row_mut(y);
                     for ix in 0..xsize {
@@ -72,7 +70,7 @@ impl<T: RenderPipelineInOutStage> RunInOutStage<Image<f64>> for T {
         chunk_size: usize,
         input_buffers: &[&Image<f64>],
         output_buffers: &mut [Image<f64>],
-        mut state: Option<&mut dyn Any>,
+        mut state: Option<&mut ErasedLocalState>,
     ) {
         assert_ne!(chunk_size, 0);
         debug!("running inout stage '{self}' in simple pipeline");
@@ -101,8 +99,8 @@ impl<T: RenderPipelineInOutStage> RunInOutStage<Image<f64>> for T {
                 vec![
                     T::InputT::default();
                     // Double rounding make sure that we always have enough buffer for reading a whole SIMD lane.
-                    round_up_size_to_cache_line::<T::OutputT>(
-                        round_up_size_to_cache_line::<T::OutputT>(chunk_size)
+                    round_up_size_to_cache_line::<T::InputT>(
+                        round_up_size_to_cache_line::<T::InputT>(chunk_size)
                             + T::BORDER.0 as usize * 2
                     )
                 ];
@@ -150,7 +148,7 @@ impl<T: RenderPipelineInOutStage> RunInOutStage<Image<f64>> for T {
                     // Build flat input rows: all rows for all channels in one Vec
                     let num_input_channels = buffer_in.len();
                     let input_rows_per_channel = buffer_in[0].len();
-                    let mut input_row_data = SmallVec::new();
+                    let mut input_row_data: SmallVec<&[_], 32, StackOnly> = SmallVec::new();
                     for ch_buf in buffer_in.iter() {
                         for row in ch_buf.iter() {
                             input_row_data.push(row as &[_]);
@@ -165,7 +163,7 @@ impl<T: RenderPipelineInOutStage> RunInOutStage<Image<f64>> for T {
                     // Build flat output rows: all rows for all channels in one Vec
                     let num_output_channels = buffer_out.len();
                     let output_rows_per_channel = buffer_out[0].len();
-                    let mut output_row_data = SmallVec::new();
+                    let mut output_row_data: SmallVec<&mut [_], 8, StackOnly> = SmallVec::new();
                     for ch_buf in buffer_out.iter_mut() {
                         for row in ch_buf.iter_mut() {
                             output_row_data.push(row as &mut [_]);
@@ -183,6 +181,7 @@ impl<T: RenderPipelineInOutStage> RunInOutStage<Image<f64>> for T {
                         &input_rows,
                         &mut output_rows,
                         state.as_deref_mut(),
+                        false,
                     );
                 }
 

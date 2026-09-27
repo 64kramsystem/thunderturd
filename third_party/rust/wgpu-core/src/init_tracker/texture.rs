@@ -1,9 +1,8 @@
 use super::{InitTracker, MemoryInitKind};
-use crate::resource::Texture;
-use alloc::{sync::Arc, vec::Vec};
+use crate::resource::{Texture, TextureView};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use arrayvec::ArrayVec;
 use core::ops::Range;
-use wgt::TextureSelector;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TextureInitRange {
@@ -18,7 +17,7 @@ pub(crate) struct TextureInitRange {
 pub(crate) fn has_copy_partial_init_tracker_coverage<T>(
     copy_size: &wgt::Extent3d,
     copy_info: &wgt::TexelCopyTextureInfo<T>,
-    desc: &wgt::TextureDescriptor<(), Vec<wgt::TextureFormat>>,
+    desc: &wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
 ) -> bool {
     let target_size = desc.mip_level_size(copy_info.mip_level).unwrap();
     copy_size.width != target_size.width
@@ -28,11 +27,17 @@ pub(crate) fn has_copy_partial_init_tracker_coverage<T>(
         || copy_info.aspect != wgt::TextureAspect::All
 }
 
-impl From<TextureSelector> for TextureInitRange {
-    fn from(selector: TextureSelector) -> Self {
+impl From<&'_ TextureView> for TextureInitRange {
+    fn from(view: &'_ TextureView) -> Self {
+        // TextureInitRange is always array layers, never depth slices.
+        let layer_range = if view.parent.desc.dimension == wgt::TextureDimension::D3 {
+            0..1
+        } else {
+            view.selector.layers.clone()
+        };
         TextureInitRange {
-            mip_range: selector.mips,
-            layer_range: selector.layers,
+            mip_range: view.selector.mips.clone(),
+            layer_range,
         }
     }
 }

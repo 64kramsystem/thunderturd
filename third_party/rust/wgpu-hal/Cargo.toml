@@ -13,8 +13,7 @@
 edition = "2021"
 rust-version = "1.87"
 name = "wgpu-hal"
-version = "29.0.0"
-authors = ["gfx-rs developers"]
+version = "30.0.0"
 build = "build.rs"
 autolib = false
 autobins = false
@@ -57,22 +56,22 @@ dx12 = [
     "dep:bytemuck",
     "dep:gpu-allocator",
     "dep:libloading",
-    "dep:once_cell",
     "dep:ordered-float",
-    "dep:parking_lot",
     "dep:profiling",
     "dep:range-alloc",
     "dep:windows-core",
     "gpu-allocator/d3d12",
     "naga/hlsl-out",
-    "once_cell/std",
+    "wgpu-sync/std",
     "windows/Win32_Devices_DeviceAndDriverInstallation",
+    "windows/Win32_Devices_Display",
     "windows/Win32_Graphics_Direct3D_Dxc",
     "windows/Win32_Graphics_Direct3D_Fxc",
     "windows/Win32_Graphics_Direct3D",
     "windows/Win32_Graphics_Direct3D12",
     "windows/Win32_Graphics_DirectComposition",
     "windows/Win32_Graphics_Dxgi_Common",
+    "windows/Win32_Graphics_Gdi",
     "windows/Win32_Security",
     "windows/Win32_System_Diagnostics_Debug",
     "windows/Win32_System_Kernel",
@@ -91,13 +90,13 @@ gles = [
     "dep:libloading",
     "dep:ndk-sys",
     "dep:objc2",
-    "dep:parking_lot",
     "dep:profiling",
     "dep:wasm-bindgen",
     "dep:wayland-sys",
     "dep:web-sys",
     "dep:windows-result",
     "naga/glsl-out",
+    "wgpu-sync/std",
     "wgpu-types/web",
     "windows-result/std",
     "windows/Win32_Graphics_Gdi",
@@ -108,32 +107,31 @@ gles = [
 internal_error_panic = []
 metal = [
     "naga/msl-out",
+    "wgpu-sync/std",
     "dep:arrayvec",
     "dep:block2",
     "dep:bytemuck",
-    "dep:libc",
+    "dep:libloading",
     "dep:objc2",
     "dep:objc2-core-foundation",
+    "dep:objc2-core-graphics",
     "dep:objc2-foundation",
     "dep:objc2-metal",
     "dep:objc2-quartz-core",
-    "dep:parking_lot",
     "dep:profiling",
     "dep:smallvec",
     "dep:raw-window-metal",
 ]
-portable-atomic = [
-    "dep:portable-atomic",
-    "dep:portable-atomic-util",
-]
+portable-atomic = ["wgpu-sync/portable-atomic"]
 renderdoc = [
     "dep:libloading",
     "dep:renderdoc-sys",
 ]
 static-dxc = ["dep:mach-dxcompiler-rs"]
-validation_canary = ["dep:parking_lot"]
+validation_canary = ["wgpu-sync/std"]
 vulkan = [
     "naga/spv-out",
+    "wgpu-sync/std",
     "dep:android_system_properties",
     "dep:arrayvec",
     "dep:ash",
@@ -141,13 +139,18 @@ vulkan = [
     "dep:libc",
     "dep:libloading",
     "dep:ordered-float",
-    "dep:parking_lot",
     "dep:profiling",
     "dep:raw-window-metal",
     "dep:smallvec",
     "dep:windows",
+    "dep:windows-core",
     "gpu-allocator/vulkan",
     "windows/Win32",
+    "windows/Win32_Devices_Display",
+    "windows/Win32_Foundation",
+    "windows/Win32_Graphics_Dxgi",
+    "windows/Win32_Graphics_Dxgi_Common",
+    "windows/Win32_Graphics_Gdi",
 ]
 
 [lib]
@@ -188,11 +191,11 @@ optional = true
 version = "1"
 
 [dependencies.glow]
-version = "0.17"
+version = "0.18"
 optional = true
 
 [dependencies.hashbrown]
-version = "0.16"
+version = "0.17"
 features = [
     "default-hasher",
     "inline-more",
@@ -203,17 +206,17 @@ default-features = false
 version = "0.4.29"
 
 [dependencies.naga]
-version = "29.0.0"
+version = "30.0.0"
 path = "../naga"
+
+[dependencies.naga-types]
+version = "30.0.0"
+path = "../naga-types"
 
 [dependencies.ordered-float]
 version = ">=3, <6.0"
 optional = true
 default-features = false
-
-[dependencies.parking_lot]
-version = "0.12.3"
-optional = true
 
 [dependencies.profiling]
 version = "1.0.1"
@@ -232,11 +235,16 @@ version = "2.0.12"
 default-features = false
 
 [dependencies.wgpu-naga-bridge]
-version = "29.0.0"
+version = "30.0.0"
 path = "../wgpu-naga-bridge"
 
+[dependencies.wgpu-sync]
+version = "30.0.0"
+path = "../wgpu-sync"
+default-features = false
+
 [dependencies.wgpu-types]
-version = "29.0.0"
+version = "30.0.0"
 path = "../wgpu-types"
 default-features = false
 
@@ -248,7 +256,7 @@ default-features = false
 version = "0.33.0"
 
 [dev-dependencies.naga]
-version = "29.0.0"
+version = "30.0.0"
 path = "../naga"
 features = [
     "wgsl-in",
@@ -260,20 +268,20 @@ version = "0.30.8"
 features = ["android-native-activity"]
 
 [build-dependencies.cfg_aliases]
-version = "0.2.1"
+version = "0.2.2"
 
-[target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies.js-sys]
-version = "0.3.85"
+[target.'cfg(all(target_family = "wasm", not(target_os = "emscripten")))'.dependencies.js-sys]
+version = "0.3.104"
 optional = true
 default-features = true
 
-[target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies.wasm-bindgen]
-version = "0.2.108"
+[target.'cfg(all(target_family = "wasm", not(target_os = "emscripten")))'.dependencies.wasm-bindgen]
+version = "0.2.127"
 optional = true
 default-features = false
 
-[target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies.web-sys]
-version = "0.3.85"
+[target.'cfg(all(target_family = "wasm", not(target_os = "emscripten")))'.dependencies.web-sys]
+version = "0.3.104"
 features = [
     "default",
     "Window",
@@ -294,11 +302,7 @@ version = "0.1.4"
 optional = true
 default-features = false
 
-[target.'cfg(any(not(target_has_atomic = "64"), not(target_has_atomic = "ptr")))'.dependencies.portable-atomic]
-version = "1.10"
-optional = true
-
-[target.'cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "visionos", target_env = "ohos")))'.dev-dependencies.glutin]
+[target.'cfg(not(any(target_family = "wasm", target_os = "ios", target_os = "visionos", target_env = "ohos")))'.dev-dependencies.glutin]
 version = "0.32"
 features = [
     "egl",
@@ -308,7 +312,7 @@ features = [
 ]
 default-features = false
 
-[target.'cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "visionos", target_env = "ohos")))'.dev-dependencies.glutin-winit]
+[target.'cfg(not(any(target_family = "wasm", target_os = "ios", target_os = "visionos", target_env = "ohos")))'.dev-dependencies.glutin-winit]
 version = "0.5"
 features = [
     "egl",
@@ -318,37 +322,32 @@ features = [
 ]
 default-features = false
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.ash]
+[target.'cfg(not(target_family = "wasm"))'.dependencies.ash]
 version = "0.38"
 optional = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.gpu-allocator]
+[target.'cfg(not(target_family = "wasm"))'.dependencies.gpu-allocator]
 version = "0.28"
 features = ["hashbrown"]
 optional = true
 default-features = false
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.khronos-egl]
+[target.'cfg(not(target_family = "wasm"))'.dependencies.khronos-egl]
 version = "6"
 features = ["dynamic"]
 optional = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.libloading]
+[target.'cfg(not(target_family = "wasm"))'.dependencies.libloading]
 version = "0.8"
 optional = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.renderdoc-sys]
+[target.'cfg(not(target_family = "wasm"))'.dependencies.renderdoc-sys]
 version = "1"
 optional = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.smallvec]
+[target.'cfg(not(target_family = "wasm"))'.dependencies.smallvec]
 version = "1.14"
 features = ["union"]
-optional = true
-
-[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies.portable-atomic-util]
-version = "0.2.4"
-features = ["alloc"]
 optional = true
 
 [target.'cfg(target_os = "android")'.dependencies.android_system_properties]
@@ -392,6 +391,15 @@ version = "0.3.2"
 features = [
     "std",
     "CFCGTypes",
+]
+optional = true
+default-features = false
+
+[target.'cfg(target_vendor = "apple")'.dependencies.objc2-core-graphics]
+version = "0.3.2"
+features = [
+    "std",
+    "CGColorSpace",
 ]
 optional = true
 default-features = false
@@ -455,6 +463,7 @@ version = "0.3.2"
 features = [
     "std",
     "objc2-core-foundation",
+    "objc2-core-graphics",
     "CALayer",
     "CAMetalLayer",
     "objc2-metal",
@@ -467,7 +476,7 @@ version = "1.0"
 optional = true
 
 [target."cfg(unix)".dependencies.libc]
-version = "0.2.172"
+version = "0.2.183"
 optional = true
 default-features = false
 
@@ -481,18 +490,13 @@ features = [
 optional = true
 
 [target."cfg(windows)".dependencies.bit-set]
-version = "0.10"
+version = "0.11"
 optional = true
 default-features = false
 
 [target."cfg(windows)".dependencies.glutin_wgl_sys]
 version = "0.6"
 optional = true
-
-[target."cfg(windows)".dependencies.once_cell]
-version = "1.21"
-optional = true
-default-features = false
 
 [target."cfg(windows)".dependencies.range-alloc]
 version = "0.1"
@@ -513,10 +517,14 @@ version = "0.4"
 optional = true
 default-features = false
 
+[lints.rust]
+missing_debug_implementations = "warn"
+
 [lints.rust.unexpected_cfgs]
 level = "warn"
 priority = 0
 check-cfg = [
     'cfg(feature, values("cargo-clippy"))',
     "cfg(web_sys_unstable_apis)",
+    "cfg(windows_angle)",
 ]

@@ -4,33 +4,61 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::any::Any;
 
 use ash::{khr, vk};
-use parking_lot::{Mutex, MutexGuard};
+use wgpu_sync::{Mutex, MutexGuard};
 
 use crate::vulkan::{
     conv, map_host_device_oom_and_lost_err,
     semaphore_list::SemaphoreType,
-    swapchain::{Surface, SurfaceTextureMetadata, Swapchain, SwapchainSubmissionSemaphoreGuard},
-    DeviceShared, InstanceShared,
+    swapchain::{
+        Surface, SurfaceTextureMetadata, Swapchain, SwapchainSubmissionSemaphoreGuard, WindowHandle,
+    },
+    DeviceShared, InstanceShared, PnextChain,
 };
 
 pub(crate) struct NativeSurface {
     raw: vk::SurfaceKHR,
     functor: khr::surface::Instance,
     instance: Arc<InstanceShared>,
+    /// Built from the window's `HWND` (Windows only) to answer the display-HDR
+    /// query; `None` for non-Win32 surfaces.
+    #[cfg(windows)]
+    hdr_source: Option<crate::auxil::dxgi::hdr::DxgiHdrSource>,
+    /// A caller-provided `pNext` chain to attach to the [`vk::SwapchainCreateInfoKHR`]
+    /// of the next swapchain created for this surface.
+    ///
+    /// Set only through
+    /// [`Surface::set_next_swapchain_create_chain()`](crate::vulkan::Surface::set_next_swapchain_create_chain).
+    next_swapchain_create_chain: Mutex<Option<PnextChain>>,
 }
 
 impl NativeSurface {
-    pub fn from_vk_surface_khr(instance: &crate::vulkan::Instance, raw: vk::SurfaceKHR) -> Self {
+    pub fn from_vk_surface_khr(
+        instance: &crate::vulkan::Instance,
+        raw: vk::SurfaceKHR,
+        hwnd: Option<WindowHandle>,
+    ) -> Self {
+        #[cfg(not(windows))]
+        let _ = hwnd;
         let functor = khr::surface::Instance::new(&instance.shared.entry, &instance.shared.raw);
         Self {
             raw,
             functor,
             instance: Arc::clone(&instance.shared),
+            #[cfg(windows)]
+            hdr_source: hwnd.map(|wh| crate::auxil::dxgi::hdr::DxgiHdrSource::new(wh.0)),
+            next_swapchain_create_chain: Mutex::new(None),
         }
     }
 
     pub fn as_raw(&self) -> vk::SurfaceKHR {
         self.raw
+    }
+
+    /// # Safety
+    ///
+    /// See [`Surface::set_next_swapchain_create_chain()`](crate::vulkan::Surface::set_next_swapchain_create_chain).
+    pub unsafe fn set_next_swapchain_create_chain(&self, chain: *mut core::ffi::c_void) {
+        *self.next_swapchain_create_chain.lock() = Some(PnextChain::new(chain));
     }
 }
 
@@ -132,10 +160,22 @@ impl Surface for NativeSurface {
             }
         };
 
-        let formats = raw_surface_formats
+        // Group the driver's (format, color space) pairs into one entry per
+        // format, preserving the driver's format order.
+        let mut formats: Vec<wgt::SurfaceFormatCapabilities> = Vec::new();
+        for (format, color_space) in raw_surface_formats
             .into_iter()
             .filter_map(conv::map_vk_surface_formats)
-            .collect();
+        {
+            let color_spaces = color_space.to_color_spaces().unwrap();
+            match formats.iter_mut().find(|fc| fc.format == format) {
+                Some(fc) => fc.color_spaces |= color_spaces,
+                None => formats.push(wgt::SurfaceFormatCapabilities {
+                    format,
+                    color_spaces,
+                }),
+            }
+        }
         Some(crate::SurfaceCapabilities {
             formats,
             // TODO: Right now we're always truncating the swap chain
@@ -167,13 +207,7 @@ impl Surface for NativeSurface {
             .map(|osc| osc.as_any().downcast_ref::<NativeSwapchain>().unwrap().raw)
             .unwrap_or(vk::SwapchainKHR::null());
 
-        let color_space = if config.format == wgt::TextureFormat::Rgba16Float {
-            // Enable wide color gamut mode
-            // Vulkan swapchain for Android only supports DISPLAY_P3_NONLINEAR_EXT and EXTENDED_SRGB_LINEAR_EXT
-            vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT
-        } else {
-            vk::ColorSpaceKHR::SRGB_NONLINEAR
-        };
+        let color_space = conv::map_surface_color_space(config.color_space);
 
         let original_format = device.shared.private_caps.map_texture_format(config.format);
         let mut raw_flags = vk::SwapchainCreateFlagsKHR::empty();
@@ -213,6 +247,13 @@ impl Surface for NativeSurface {
             info = info.push_next(&mut format_list_info);
         }
 
+        let create_chain = self.next_swapchain_create_chain.lock().take();
+        if let Some(chain) = create_chain {
+            // SAFETY: The contract on `Surface::set_next_swapchain_create_chain()` keeps
+            // the chain valid and unaliased until this swapchain creation returns.
+            info.p_next = unsafe { chain.splice_into(info.p_next) };
+        }
+
         let result = {
             profiling::scope!("vkCreateSwapchainKHR");
             unsafe { functor.create_swapchain(&info, None) }
@@ -237,12 +278,21 @@ impl Surface for NativeSurface {
         let images = unsafe { functor.get_swapchain_images(raw) }
             .map_err(crate::vulkan::map_host_device_oom_err)?;
 
-        let fence = unsafe {
-            device
-                .shared
-                .raw
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(crate::vulkan::map_host_device_oom_err)?
+        // This fence is only used to throttle acquisition on Windows. It is very important to
+        // avoid bad frame pacing when the Vulkan driver is using a DXGI swapchain. See
+        // https://github.com/gfx-rs/wgpu/issues/8310 and
+        // https://github.com/gfx-rs/wgpu/issues/8354 for more details.
+        let fence = if cfg!(target_os = "windows") {
+            let raw = unsafe {
+                device
+                    .shared
+                    .raw
+                    .create_fence(&vk::FenceCreateInfo::default(), None)
+                    .map_err(crate::vulkan::map_host_device_oom_err)?
+            };
+            Some(raw)
+        } else {
+            None
         };
 
         // NOTE: It's important that we define the same number of acquire/present semaphores
@@ -270,7 +320,13 @@ impl Surface for NativeSurface {
             next_acquire_index: 0,
             present_semaphores,
             next_present_time: None,
+            next_present_chain: None,
         }))
+    }
+
+    #[cfg(windows)]
+    fn display_hdr_info(&self) -> Option<wgt::DisplayHdrInfo> {
+        self.hdr_source.as_ref()?.display_hdr_info()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -284,7 +340,7 @@ pub(crate) struct NativeSwapchain {
     device: Arc<DeviceShared>,
     images: Vec<vk::Image>,
     /// Fence used to wait on the acquired image.
-    fence: vk::Fence,
+    fence: Option<vk::Fence>,
     config: crate::SurfaceConfiguration,
 
     /// Semaphores used between image acquisition and the first submission
@@ -331,6 +387,13 @@ pub(crate) struct NativeSwapchain {
     /// This must only be set if [`wgt::Features::VULKAN_GOOGLE_DISPLAY_TIMING`] is enabled, and
     /// so the VK_GOOGLE_display_timing extension is present.
     next_present_time: Option<vk::PresentTimeGOOGLE>,
+
+    /// A caller-provided `pNext` chain to attach to the [`vk::PresentInfoKHR`] of the next
+    /// call to [`present()`](crate::Queue::present()).
+    ///
+    /// Set only through
+    /// [`Surface::set_next_present_chain()`](crate::vulkan::Surface::set_next_present_chain).
+    next_present_chain: Option<PnextChain>,
 }
 
 impl Drop for NativeSwapchain {
@@ -357,7 +420,9 @@ impl Swapchain for NativeSwapchain {
             };
         };
 
-        unsafe { device.shared.raw.destroy_fence(self.fence, None) }
+        if let Some(fence) = self.fence {
+            unsafe { device.shared.raw.destroy_fence(fence, None) }
+        }
 
         // We cannot take this by value, as the function returns `self`.
         for semaphore in self.acquire_semaphores.drain(..) {
@@ -430,6 +495,8 @@ impl Swapchain for NativeSwapchain {
             return Err(crate::SurfaceError::Timeout);
         }
 
+        let acquire_fence = self.fence.unwrap_or_else(vk::Fence::null);
+
         // will block if no image is available
         let (index, suboptimal) = match unsafe {
             profiling::scope!("vkAcquireNextImageKHR");
@@ -437,7 +504,7 @@ impl Swapchain for NativeSwapchain {
                 self.raw,
                 timeout_ns,
                 acquire_semaphore_guard.acquire,
-                self.fence,
+                acquire_fence,
             )
         } {
             // We treat `VK_SUBOPTIMAL_KHR` as `VK_SUCCESS` on Android.
@@ -460,27 +527,19 @@ impl Swapchain for NativeSwapchain {
             }
         };
 
-        // Wait for the image was acquired to be fully ready to be rendered too.
-        //
-        // This wait is very important on Windows to avoid bad frame pacing on
-        // Windows where the Vulkan driver is using a DXGI swapchain. See
-        // https://github.com/gfx-rs/wgpu/issues/8310 and
-        // https://github.com/gfx-rs/wgpu/issues/8354 for more details.
-        //
-        // On other platforms, this wait may serve to slightly decrease frame
-        // latency, depending on how the platform implements waiting within
-        // acquire.
-        unsafe {
-            // The `wait_all` argument must be `true` to avoid crash on some Android devices. See https://github.com/gfx-rs/wgpu/pull/8769
-            self.device
-                .raw
-                .wait_for_fences(&[self.fence], true, timeout_ns)
-                .map_err(map_host_device_oom_and_lost_err)?;
+        if let Some(fence) = self.fence {
+            unsafe {
+                // The `wait_all` argument must be `true` to avoid crash on some Android devices. See https://github.com/gfx-rs/wgpu/pull/8769
+                self.device
+                    .raw
+                    .wait_for_fences(&[fence], true, timeout_ns)
+                    .map_err(map_host_device_oom_and_lost_err)?;
 
-            self.device
-                .raw
-                .reset_fences(&[self.fence])
-                .map_err(map_host_device_oom_and_lost_err)?;
+                self.device
+                    .raw
+                    .reset_fences(&[fence])
+                    .map_err(map_host_device_oom_and_lost_err)?;
+            }
         }
 
         drop(acquire_semaphore_guard);
@@ -565,7 +624,7 @@ impl Swapchain for NativeSwapchain {
 
         let mut display_timing;
         let present_times;
-        let vk_info = if let Some(present_time) = self.next_present_time.take() {
+        let mut vk_info = if let Some(present_time) = self.next_present_time.take() {
             debug_assert!(
                 self.device
                     .features
@@ -579,6 +638,12 @@ impl Swapchain for NativeSwapchain {
         } else {
             vk_info
         };
+
+        if let Some(chain) = self.next_present_chain.take() {
+            // SAFETY: The contract on `Surface::set_next_present_chain()` keeps the chain
+            // valid and unaliased until this present completes.
+            vk_info.p_next = unsafe { chain.splice_into(vk_info.p_next) };
+        }
 
         let suboptimal = {
             profiling::scope!("vkQueuePresentKHR");
@@ -631,6 +696,13 @@ impl NativeSwapchain {
                 features
             );
         }
+    }
+
+    /// # Safety
+    ///
+    /// See [`Surface::set_next_present_chain()`](crate::vulkan::Surface::set_next_present_chain).
+    pub unsafe fn set_next_present_chain(&mut self, chain: *mut core::ffi::c_void) {
+        self.next_present_chain = Some(PnextChain::new(chain));
     }
 
     /// Mark the current frame finished, advancing to the next acquire semaphore.

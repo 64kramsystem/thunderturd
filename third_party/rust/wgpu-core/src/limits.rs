@@ -244,7 +244,7 @@ pub fn apply_limit_buckets(mut raw: hal::DynExposedAdapter) -> Option<hal::DynEx
 /// at that point neither excluding the tier1 formats from WebIDL entirely nor allowing
 /// content to use them on a device that doesn't have the feature enabled will be
 /// acceptable. See <https://github.com/gfx-rs/wgpu/issues/8122>.
-const EXEMPT_FEATURES: Features = Features::EXTERNAL_TEXTURE
+pub(crate) const EXEMPT_FEATURES: Features = Features::EXTERNAL_TEXTURE
     .union(Features::TEXTURE_FORMAT_NV12)
     .union(Features::TEXTURE_FORMAT_P010)
     .union(Features::TEXTURE_FORMAT_16BIT_NORM);
@@ -308,12 +308,12 @@ const UPLEVEL: Bucket = Bucket {
         // use default max_sampled_textures_per_shader_stage
         // use default max_samplers_per_shader_stage
         // use default max_storage_buffer_binding_size
-        // wgpu does not implement max_storage_buffers_in_fragment_stage: 8,
-        // wgpu does not implement max_storage_buffers_in_vertex_stage: 8,
         // use default max_storage_buffers_per_shader_stage
-        // wgpu does not implement max_storage_textures_in_fragment_stage: 8,
-        // wgpu does not implement max_storage_textures_in_vertex_stage: 8,
+        // use default max_storage_buffers_in_vertex_stage
+        // use default max_storage_buffers_in_fragment_stage
         max_storage_textures_per_shader_stage: 8,
+        max_storage_textures_in_vertex_stage: 8,
+        max_storage_textures_in_fragment_stage: 8,
         max_texture_array_layers: 2048,
         max_texture_dimension_1d: 16384,
         max_texture_dimension_2d: 16384,
@@ -362,6 +362,9 @@ const BUCKET_M1: Bucket = Bucket {
         max_dynamic_uniform_buffers_per_pipeline_layout: 12,
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffer_binding_size: 1 << 30, // 1 GB,
+        max_storage_buffers_per_shader_stage: 9,
+        max_storage_buffers_in_vertex_stage: 9,
+        max_storage_buffers_in_fragment_stage: 9,
         max_vertex_attributes: 31,
         ..UPLEVEL.limits
     },
@@ -388,6 +391,8 @@ const BUCKET_A2: Bucket = Bucket {
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffer_binding_size: 1 << 30, // 1 GB,
         max_storage_buffers_per_shader_stage: 16,
+        max_storage_buffers_in_vertex_stage: 16,
+        max_storage_buffers_in_fragment_stage: 16,
         max_vertex_attributes: 30,
         ..UPLEVEL.limits
     },
@@ -407,6 +412,8 @@ const BUCKET_I1: Bucket = Bucket {
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffer_binding_size: 1 << 29, // 512 MB,
         max_storage_buffers_per_shader_stage: 16,
+        max_storage_buffers_in_vertex_stage: 16,
+        max_storage_buffers_in_fragment_stage: 16,
         ..UPLEVEL.limits
     },
     info: BucketedAdapterInfo {
@@ -426,6 +433,8 @@ const BUCKET_N1: Bucket = Bucket {
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffer_binding_size: 1 << 30, // 1 GB,
         max_storage_buffers_per_shader_stage: 16,
+        max_storage_buffers_in_vertex_stage: 16,
+        max_storage_buffers_in_fragment_stage: 16,
         max_vertex_attributes: 30,
         ..UPLEVEL.limits
     },
@@ -445,6 +454,8 @@ const BUCKET_A1: Bucket = Bucket {
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffer_binding_size: 1 << 30, // 1 GB,
         max_storage_buffers_per_shader_stage: 16,
+        max_storage_buffers_in_vertex_stage: 16,
+        max_storage_buffers_in_fragment_stage: 16,
         max_vertex_attributes: 30,
         ..UPLEVEL.limits
     },
@@ -465,6 +476,8 @@ const BUCKET_NO_F16: Bucket = Bucket {
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffer_binding_size: 1 << 30, // 1 GB
         max_storage_buffers_per_shader_stage: 16,
+        max_storage_buffers_in_vertex_stage: 16,
+        max_storage_buffers_in_fragment_stage: 16,
         max_vertex_attributes: 30,
         ..UPLEVEL.limits
     },
@@ -482,6 +495,8 @@ const BUCKET_LLVMPIPE: Bucket = Bucket {
         max_color_attachment_bytes_per_sample: 128,
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffers_per_shader_stage: 16,
+        max_storage_buffers_in_vertex_stage: 16,
+        max_storage_buffers_in_fragment_stage: 16,
         max_vertex_attributes: 32,
         ..UPLEVEL.limits
     },
@@ -503,6 +518,8 @@ const BUCKET_WARP: Bucket = Bucket {
         max_color_attachment_bytes_per_sample: 128,
         max_sampled_textures_per_shader_stage: 48,
         max_storage_buffers_per_shader_stage: 16,
+        max_storage_buffers_in_vertex_stage: 16,
+        max_storage_buffers_in_fragment_stage: 16,
         max_vertex_attributes: 30,
         ..UPLEVEL.limits
     },
@@ -561,8 +578,7 @@ mod tests {
                 //.union(Features::TEXTURE_FORMATS_TIER1) not implemented
                 //.union(Features::TEXTURE_FORMATS_TIER2) not implemented
                 .union(Features::PRIMITIVE_INDEX)
-                //.union(Features::TEXTURE_COMPONENT_SWIZZLE) not implemented
-                // Standard-track features not in official spec
+                .union(Features::TEXTURE_COMPONENT_SWIZZLE)
                 .union(Features::IMMEDIATES),
         );
         assert!(

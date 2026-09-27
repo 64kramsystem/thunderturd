@@ -5,15 +5,13 @@ use {
     common::*,
     error_graph::ErrorList,
     minidump_writer::minidump_writer::MinidumpWriterConfig,
-    nix::{
-        sys::mman::{MapFlags, ProtFlags, mmap},
-        sys::signal::Signal,
-    },
     std::{
         convert::TryInto,
+        ffi::c_void,
         io::{BufRead, BufReader},
         mem::size_of,
         os::unix::process::ExitStatusExt,
+        ptr,
     },
 };
 
@@ -118,7 +116,7 @@ fn thread_list_from_parent() {
     for (idx, curr_thread) in dumper.threads.iter().enumerate() {
         println!("curr_thread: {curr_thread:?}");
         let info = dumper
-            .get_thread_info_by_index(idx)
+            .get_thread_info_by_index(idx, error_graph::strategy::DontCare)
             .expect("Could not get thread info by index");
         let (_valid_stack_ptr, stack_len) = dumper
             .get_stack_info(info.stack_pointer)
@@ -165,7 +163,7 @@ fn thread_list_from_parent() {
     let waitres = child.wait().expect("Failed to wait for child");
     let status = waitres.signal().expect("Child did not die due to signal");
     assert_eq!(waitres.code(), None);
-    assert_eq!(status, Signal::SIGKILL as i32);
+    assert_eq!(status, libc::SIGKILL);
 
     // We clean up the child process before checking the final result
     // TODO: I currently know of no way to write the thread_id into the registers using Rust,
@@ -188,9 +186,10 @@ fn linux_gate_mapping_id() {
 
 #[test]
 fn merges_mappings() {
-    let page_size = nix::unistd::sysconf(nix::unistd::SysconfVar::PAGE_SIZE).unwrap();
-    let page_size = std::num::NonZeroUsize::new(page_size.unwrap() as usize).unwrap();
-    let map_size = std::num::NonZeroUsize::new(3 * page_size.get()).unwrap();
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    assert!(page_size > 0);
+    let page_size = usize::try_from(page_size).unwrap();
+    let map_size = 3 * page_size;
 
     let path: String = if let Ok(p) = std::env::var("TEST_HELPER") {
         p
@@ -202,30 +201,31 @@ fn merges_mappings() {
     // mmap two segments out of the helper binary, one
     // enclosed in the other, but with different protections.
     let mapped_mem = unsafe {
-        mmap(
-            None,
+        let ptr = libc::mmap(
+            ptr::null_mut(),
             map_size,
-            ProtFlags::PROT_READ,
-            MapFlags::MAP_SHARED,
-            &file,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            std::os::fd::AsRawFd::as_raw_fd(&file),
             0,
-        )
-        .unwrap()
+        );
+        assert!(ptr != libc::MAP_FAILED);
+        ptr
     };
 
-    let mapped = mapped_mem.as_ptr() as usize;
+    let mapped = mapped_mem as usize;
 
     // Carve a page out of the first mapping with different permissions.
     let _inside_mapping = unsafe {
-        mmap(
-            std::num::NonZeroUsize::new(mapped + 2 * page_size.get()),
+        libc::mmap(
+            (mapped + 2 * page_size) as *mut c_void,
             page_size,
-            ProtFlags::PROT_NONE,
-            MapFlags::MAP_SHARED | MapFlags::MAP_FIXED,
-            &file,
+            libc::PROT_NONE,
+            libc::MAP_SHARED | libc::MAP_FIXED,
+            std::os::fd::AsRawFd::as_raw_fd(&file),
             // Map a different offset just to
             // better test real-world conditions.
-            page_size.get().try_into().unwrap(), // try_into() in order to work for 32 and 64 bit
+            page_size.try_into().unwrap(),
         )
     };
 
@@ -293,7 +293,7 @@ fn sanitizes_stack_copies() {
     assert_eq!(dumper.threads.len(), num_of_threads);
 
     let thread_info = dumper
-        .get_thread_info_by_index(0)
+        .get_thread_info_by_index(0, error_graph::strategy::DontCare)
         .expect("Couldn't find thread_info");
 
     let defaced;
@@ -338,7 +338,7 @@ fn sanitizes_stack_copies() {
     // The instruction pointer definitely should point into an executable mapping.
     let instr_ptr = thread_info.get_instruction_pointer();
     let mapping_info = dumper
-        .find_mapping_no_bias(instr_ptr)
+        .find_mapping(instr_ptr)
         .expect("Failed to find mapping info");
     assert!(mapping_info.is_executable());
 
@@ -392,5 +392,5 @@ fn sanitizes_stack_copies() {
     let waitres = child.wait().expect("Failed to wait for child");
     let status = waitres.signal().expect("Child did not die due to signal");
     assert_eq!(waitres.code(), None);
-    assert_eq!(status, Signal::SIGKILL as i32);
+    assert_eq!(status, libc::SIGKILL);
 }

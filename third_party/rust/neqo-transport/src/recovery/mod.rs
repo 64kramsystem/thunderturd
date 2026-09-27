@@ -261,7 +261,6 @@ impl LossRecoverySpace {
     fn remove_acked<R>(&mut self, acked_ranges: R, stats: &mut Stats) -> (Vec<sent::Packet>, bool)
     where
         R: IntoIterator<Item = RangeInclusive<packet::Number>>,
-        R::IntoIter: ExactSizeIterator,
     {
         let acked = self.sent_packets.take_ranges(acked_ranges);
         let mut eliciting = false;
@@ -270,6 +269,19 @@ impl LossRecoverySpace {
             eliciting |= p.ack_eliciting();
             if p.lost() {
                 stats.late_ack += 1;
+                if let Some(reduced) = stats.lost.checked_sub(1) {
+                    stats.lost = reduced;
+                } else {
+                    debug_assert!(false, "spurious losses should have been lost already");
+                }
+                if let Some(reduced) = stats.bytes_lost.checked_sub(p.len()) {
+                    stats.bytes_lost = reduced;
+                } else {
+                    debug_assert!(
+                        false,
+                        "spurious lost bytes should have been counted already"
+                    );
+                }
             }
             if p.pto_fired() {
                 stats.pto_ack += 1;
@@ -326,7 +338,6 @@ impl LossRecoverySpace {
         for packet in self
             .sent_packets
             .iter_mut()
-            // BTreeMap iterates in order of ascending PN
             .take_while(|p| largest_acked.is_some_and(|largest_ack| p.pn() < largest_ack))
         {
             // Packets sent before now - loss_delay are deemed lost.
@@ -512,6 +523,12 @@ impl Loss {
         self.qlog = qlog;
     }
 
+    fn count_lost(&self, lost: &[sent::Packet]) {
+        let mut stats = self.stats.borrow_mut();
+        stats.lost += lost.len();
+        stats.bytes_lost += lost.iter().map(sent::Packet::len).sum::<usize>();
+    }
+
     /// Drop all 0rtt packets.
     pub fn drop_0rtt(&mut self, primary_path: &PathRef, now: Instant) -> Vec<sent::Packet> {
         let Some(sp) = self.spaces.get_mut(PacketNumberSpace::ApplicationData) else {
@@ -627,7 +644,6 @@ impl Loss {
     ) -> (Vec<sent::Packet>, Vec<sent::Packet>)
     where
         R: IntoIterator<Item = RangeInclusive<packet::Number>>,
-        R::IntoIter: ExactSizeIterator,
     {
         let Some(space) = self.spaces.get_mut(pn_space) else {
             qinfo!("ACK on discarded space");
@@ -676,7 +692,7 @@ impl Loss {
         let loss_delay = primary_path.borrow().rtt().loss_delay();
         let mut lost = Vec::new();
         sp.detect_lost_packets(now, loss_delay, cleanup_delay, &mut lost);
-        self.stats.borrow_mut().lost += lost.len();
+        self.count_lost(&lost);
 
         // Tell the congestion controller about any lost packets.
         // The PTO for congestion control is the raw number, without exponential
@@ -845,6 +861,12 @@ impl Loss {
         )
     }
 
+    /// The number of consecutive PTOs that have fired without being acknowledged.
+    /// The value is reset to `0` whenever an acknowledgement is received.
+    pub(crate) fn pto_count(&self) -> usize {
+        self.pto_state.as_ref().map_or(0, PtoState::count)
+    }
+
     // Calculate PTO time for the given space.
     fn pto_time(&self, rtt: &RttEstimate, pn_space: PacketNumberSpace) -> Option<Instant> {
         self.spaces
@@ -991,7 +1013,7 @@ impl Loss {
                 now,
             );
         }
-        self.stats.borrow_mut().lost += lost_packets.len();
+        self.count_lost(&lost_packets);
 
         self.maybe_fire_pto(primary_path, now, &mut lost_packets, has_handshake_keys);
         lost_packets
@@ -1042,6 +1064,11 @@ impl Display for Loss {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(
+    clippy::allow_attributes,
+    clippy::single_range_in_vec_init,
+    reason = "TODO: false positive in clippy 1.98-nightly; re-check when bumping MSRV"
+)]
 mod tests {
     use std::{
         cell::RefCell,
@@ -1050,7 +1077,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use neqo_common::qlog::Qlog;
+    use neqo_common::{qlog::Qlog, to_u64};
     use test_fixture::{DEFAULT_ADDR, now};
 
     use super::{
@@ -1739,7 +1766,7 @@ mod tests {
         lr.on_packet_sent(
             sent::Packet::new(
                 packet::Type::Handshake,
-                0,
+                1,
                 now,
                 true,
                 recovery::Tokens::new(),
@@ -2051,7 +2078,7 @@ mod tests {
         let pto = ms(100);
 
         // Add exactly MIN_OUTSTANDING_UNACK packets → n_pto = 2.
-        add_sent(&mut lrs, (MIN_OUTSTANDING_UNACK - 1) as u64);
+        add_sent(&mut lrs, to_u64(MIN_OUTSTANDING_UNACK - 1));
         assert_eq!(lrs.sent_packets.len(), MIN_OUTSTANDING_UNACK);
 
         lrs.last_ack_eliciting = Some(t);
