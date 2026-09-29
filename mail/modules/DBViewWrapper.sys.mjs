@@ -1053,18 +1053,14 @@ DBViewWrapper.prototype = {
       this._ensureValidSort();
     }
 
-    // See if the last-used view was one of the special views.  If so, put us in
-    //  that special view mode.  We intentionally do this after restoring the
-    //  view flags because _setSpecialView enforces threading.
-    // The nsMsgDBView is the one who persists this information for us.  In this
-    //  case the nsMsgThreadedDBView superclass of the special views triggers it
-    //  when opened.
+    // Restore the filter without _setSpecialView forcing threaded display over
+    // the user's saved view flags.
     const viewType = dbFolderInfo.viewType;
     if (
       viewType == Ci.nsMsgViewType.eShowThreadsWithUnread ||
       viewType == Ci.nsMsgViewType.eShowWatchedThreadsWithUnread
     ) {
-      this._setSpecialView(viewType);
+      this._specialView = viewType;
     }
 
     // - retrieve virtual folder configuration

@@ -12,6 +12,97 @@
 load("resources/viewWrapperTestUtils.js");
 initViewWrapperTestUtils({ mode: "imap", offline: false });
 
+var { SyntheticMessageSet } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+);
+
+add_task(async function test_imap_special_view_threading_persistence() {
+  for (const specialView of [
+    "specialViewThreadsWithUnread",
+    "specialViewWatchedThreadsWithUnread",
+  ]) {
+    info(`Checking threading persistence for ${specialView}`);
+    const folderHandle = await messageInjection.makeEmptyFolder();
+    const folder = messageInjection.getRealInjectionFolder(folderHandle);
+    const threads = Array.from(
+      { length: 3 },
+      () => new SyntheticMessageSet(gMessageScenarioFactory.directReply(2))
+    );
+    const [watchedThread, unreadThread, readThread] = threads;
+    for (const messageSet of threads) {
+      messageSet.synMessages[0].metaState.read = true;
+    }
+    readThread.synMessages[1].metaState.read = true;
+    await messageInjection.addSetsToFolders([folderHandle], threads);
+    const thread = folder.msgDatabase.getThreadContainingMsgHdr(
+      watchedThread.getMsgHdr(0)
+    );
+    folder.msgDatabase.markThreadWatched(
+      thread,
+      watchedThread.getMsgHdr(0).messageKey,
+      true,
+      null
+    );
+    const expectedMessages =
+      specialView == "specialViewThreadsWithUnread"
+        ? [watchedThread, unreadThread]
+        : [watchedThread];
+
+    let viewWrapper = make_view_wrapper();
+    await view_open(viewWrapper, folder);
+    viewWrapper[specialView] = true;
+    Assert.ok(
+      viewWrapper.showThreaded,
+      "Selecting a thread filter enables threading"
+    );
+    viewWrapper.showUnthreaded = true;
+    verify_messages_in_view(expectedMessages, viewWrapper);
+    const savedViewFlags = viewWrapper.dbView.viewFlags;
+    const savedViewType = viewWrapper.dbView.viewType;
+    viewWrapper.close();
+    folder.msgDatabase.forceClosed();
+
+    Assert.equal(
+      folder.msgDatabase.dBFolderInfo.viewFlags,
+      savedViewFlags,
+      "Unthreaded flags reached the folder database on disk"
+    );
+    viewWrapper = make_view_wrapper();
+    await view_open(viewWrapper, folder);
+    Assert.ok(
+      viewWrapper.showUnthreaded,
+      "Reopening preserves unthreaded display"
+    );
+    Assert.ok(
+      viewWrapper[specialView],
+      "Reopening preserves the thread filter"
+    );
+    Assert.equal(viewWrapper.dbView.viewType, savedViewType);
+    Assert.equal(viewWrapper.dbView.viewFlags, savedViewFlags);
+    verify_messages_in_view(expectedMessages, viewWrapper);
+    verify_view_level_histogram(
+      { 0: expectedMessages.length * 2 },
+      viewWrapper
+    );
+
+    viewWrapper.showThreaded = true;
+    viewWrapper.close();
+    folder.msgDatabase.forceClosed();
+    viewWrapper = make_view_wrapper();
+    await view_open(viewWrapper, folder);
+    Assert.ok(
+      viewWrapper.showThreaded,
+      "Reopening also preserves threaded display"
+    );
+    Assert.ok(
+      viewWrapper[specialView],
+      "Threaded display retains the thread filter"
+    );
+    verify_view_row_at_index_is_container(viewWrapper, 0);
+    viewWrapper.close();
+  }
+});
+
 /**
  * Create an empty folder, inject messages into it without triggering an
  *  updateFolder, sanity check that we believe there are no messages in the
