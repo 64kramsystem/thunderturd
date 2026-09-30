@@ -3125,7 +3125,7 @@ var folderPane = {
 
     // If the currently dragged row is not part of the selection map, use it
     // instead of the current selection entries.
-    const rows = folderTree.selection.has(folderTree.rows.indexOf(draggedRow))
+    const rows = folderTree.selection.has(draggedRow)
       ? [...folderTree.selection.values()]
       : [draggedRow];
 
@@ -3584,6 +3584,7 @@ var folderPane = {
           }
         }
         Services.prefs.setBoolPref("mail.last_msg_movecopy_was_move", isMove);
+        this.swapFolderSelection(rows);
       } else {
         // FIXME! Bug 1896531.
         console.warn(
@@ -3600,7 +3601,6 @@ var folderPane = {
             sourceFolder,
             targetFolder
           );
-          rows.push(this.getRowForFolder(sourceFolder.URI, row.modeName));
         }
         // Save in prefs the target folder URI and if this was a move or copy.
         // This is to fill in the next folder or message context menu item
@@ -3611,7 +3611,6 @@ var folderPane = {
         );
         Services.prefs.setBoolPref("mail.last_msg_movecopy_was_move", isMove);
       }
-      this.swapFolderSelection(rows);
     } else if (types.includes("application/x-moz-file")) {
       const files = [];
       for (let i = 0; i < event.dataTransfer.mozItemCount; i++) {
